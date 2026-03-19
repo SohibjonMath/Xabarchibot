@@ -66,29 +66,44 @@ STATE_DIR = Path(os.getenv("STATE_DIR", "./data"))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = STATE_DIR / "contest_state.json"
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎁 Musobaqa posti", callback_data="postnow"),
-            InlineKeyboardButton("🏆 G‘olib tanlash", callback_data="drawnow"),
-        ],
-        [
-            InlineKeyboardButton("📊 Bugungi holat", callback_data="today"),
-            InlineKeyboardButton("💰 Faol skidkalar", callback_data="discounts"),
-        ],
-        [
-            InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
-            InlineKeyboardButton("🥇 TOP 5", callback_data="top5"),
-        ],
-        [
-            InlineKeyboardButton("⚙️ Status", callback_data="status"),
-            InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
-        ],
-    ])
+def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
+    is_user_admin = user_id in ADMIN_USER_IDS
+
+    if is_user_admin:
+        rows = [
+            [
+                InlineKeyboardButton("🎁 Musobaqa posti", callback_data="postnow"),
+                InlineKeyboardButton("🏆 G‘olib tanlash", callback_data="drawnow"),
+            ],
+            [
+                InlineKeyboardButton("📊 Bugungi holat", callback_data="today"),
+                InlineKeyboardButton("💰 Faol skidkalar", callback_data="discounts"),
+            ],
+            [
+                InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
+                InlineKeyboardButton("🥇 TOP 5", callback_data="top5"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Status", callback_data="status"),
+                InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
+            ],
+        ]
+    else:
+        rows = [
+            [
+                InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
+                InlineKeyboardButton("🥇 TOP 5", callback_data="top5"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
+            ],
+        ]
+
+    return InlineKeyboardMarkup(rows)
 
 HELP_TEXT = """🤖 <b>OrzuMall Xabarchi</b>
 
-Kerakli bo‘limni pastdagi tugmalardan tanlang.
+Kerakli bo‘limni pastdagi tugmalardan tanlang. Admin va foydalanuvchi menyusi alohida.
 
 <b>Asosiy funksiyalar:</b>
 • Kanalga avtomatik forward post
@@ -159,7 +174,8 @@ async def send_text(update: Update, text: str, **kwargs):
         await update.message.reply_text(text, **kwargs)
 
 async def send_or_edit_menu(update: Update, text: str):
-    markup = main_menu_keyboard()
+    user = update.effective_user
+    markup = main_menu_keyboard(user.id if user else 0)
     if update.callback_query:
         try:
             await update.callback_query.edit_message_text(
@@ -667,6 +683,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
 
     data = query.data
+    admin_buttons = {"postnow", "drawnow", "today", "discounts", "status"}
+    user = update.effective_user
+    if data in admin_buttons and (not user or user.id not in ADMIN_USER_IDS):
+        await query.answer("Bu bo‘lim faqat admin uchun.", show_alert=True)
+        return
     if data == "postnow":
         await postnow(update, context)
     elif data == "drawnow":
