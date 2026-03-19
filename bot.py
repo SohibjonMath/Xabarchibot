@@ -7,10 +7,15 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     ChatJoinRequestHandler,
     ChatMemberHandler,
     CommandHandler,
@@ -61,26 +66,38 @@ STATE_DIR = Path(os.getenv("STATE_DIR", "./data"))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = STATE_DIR / "contest_state.json"
 
-HELP_TEXT = """Salom. Men OrzuMall multi botman.
+def main_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎁 Musobaqa posti", callback_data="postnow"),
+            InlineKeyboardButton("🏆 G‘olib tanlash", callback_data="drawnow"),
+        ],
+        [
+            InlineKeyboardButton("📊 Bugungi holat", callback_data="today"),
+            InlineKeyboardButton("💰 Faol skidkalar", callback_data="discounts"),
+        ],
+        [
+            InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
+            InlineKeyboardButton("🥇 TOP 5", callback_data="top5"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Status", callback_data="status"),
+            InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
+        ],
+    ])
 
-Asosiy funksiyalar:
-1) Har kuni kanalga forward post tashlash
-2) Har kuni 06:00 da guruhga musobaqa posti tashlash
-3) Shu postga reaksiya bildirganlardan 20:00 da random g'olib tanlash
-4) G'olibga 25% skidka (1 martalik, max 1 000 000 so'mgacha, 72 soat amal)
-5) Guruhga eng ko'p odam qo'shgan TOP 5 ni aniqlash
+HELP_TEXT = """🤖 <b>OrzuMall Xabarchi</b>
 
-Buyruqlar:
-/start - yordam
-/status - joriy sozlamalar
-/testforward - hozir forward sinovi
-/postnow - hozir contest post tashlash
-/drawnow - hozir winner tanlash
-/today - bugungi contest holati
-/discounts - faol skidkalar (admin)
-/myref - shaxsiy taklif havolangiz
-/top5 - oxirgi 24 soat ichidagi top 5 taklifchi
-"""
+Kerakli bo‘limni pastdagi tugmalardan tanlang.
+
+<b>Asosiy funksiyalar:</b>
+• Kanalga avtomatik forward post
+• 06:00 da contest post
+• 20:00 da random g‘olib
+• 25% skidka nazorati
+• Referral orqali TOP 5
+
+👇 Tugmalardan foydalaning"""
 
 def tz_now() -> datetime:
     return datetime.now(ZoneInfo(TZ))
@@ -101,8 +118,8 @@ def load_state() -> dict:
         "participants_meta": {},
         "discounts": {},
         "winner_history": {},
-        "invite_links": {},   # owner_uid -> {"invite_link": "...", "created_at": "..."}
-        "invite_joins": [],   # {"ts","inviter_id","joined_id","source","joined_label","inviter_label"}
+        "invite_links": {},
+        "invite_joins": [],
     }
 
 STATE = load_state()
@@ -134,6 +151,40 @@ def user_label(user) -> str:
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_USER_IDS
+
+async def send_text(update: Update, text: str, **kwargs):
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, **kwargs)
+    elif update.message:
+        await update.message.reply_text(text, **kwargs)
+
+async def send_or_edit_menu(update: Update, text: str):
+    markup = main_menu_keyboard()
+    if update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                text=text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+                disable_web_page_preview=True,
+            )
+            return
+        except Exception:
+            pass
+    if update.message:
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+            disable_web_page_preview=True,
+        )
 
 def cleanup_expired_discounts() -> None:
     now = tz_now()
@@ -223,7 +274,6 @@ def invite_top5_text(window_hours: int = 24) -> str:
         if ts <= now - timedelta(hours=window_hours):
             continue
 
-        # bir foydalanuvchini bir inviterga takror hisoblamaslik
         key = (str(item["inviter_id"]), str(item["joined_id"]))
         if key in seen_pairs:
             continue
@@ -242,7 +292,7 @@ def invite_top5_text(window_hours: int = 24) -> str:
         return (
             "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 5</b>\n\n"
             "Hozircha natija yo‘q.\n\n"
-            "💡 Eng yaxshi ishlashi uchun ishtirokchilar <b>/myref</b> orqali o‘z taklif havolasidan foydalansin."
+            "💡 Eng yaxshi usul: <b>/myref</b> tugmasi orqali shaxsiy taklif havolangizni olib tarqating."
         )
 
     lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 5</b>\n"]
@@ -279,28 +329,30 @@ def register_invite_join(inviter_id: int, inviter_label: str, joined_id: int, jo
     save_state()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message:
-        await update.message.reply_text(HELP_TEXT)
+    await send_or_edit_menu(update, HELP_TEXT)
+
+async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await send_or_edit_menu(update, HELP_TEXT)
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_expired_discounts()
     cleanup_old_invite_events()
     text = (
-        f"TARGET_CHANNEL: {TARGET_CHANNEL or 'kiritilmagan'}\n"
-        f"SOURCE_CHAT_ID: {SOURCE_CHAT_ID or 'kiritilmagan'}\n"
-        f"SOURCE_MESSAGE_ID: {SOURCE_MESSAGE_ID if SOURCE_MESSAGE_ID else 'kiritilmagan'}\n"
-        f"Forward vaqti: {POST_HOUR:02d}:{POST_MINUTE:02d}\n"
-        f"CONTEST_CHAT_ID: {CONTEST_CHAT_ID or 'kiritilmagan'}\n"
-        f"Contest posti: {MORNING_HOUR:02d}:{MORNING_MINUTE:02d}\n"
-        f"Winner vaqti: {WINNER_HOUR:02d}:{WINNER_MINUTE:02d}\n"
-        f"INVITE_CHAT_ID: {INVITE_CHAT_ID or 'kiritilmagan'}\n"
-        f"TOP 5 e'lon: {TOP_HOUR:02d}:{TOP_MINUTE:02d}\n"
-        f"TZ: {TZ}\n"
-        f"Faol skidkalar: {len(STATE.get('discounts', {}))}\n"
-        f"Invite eventlar: {len(STATE.get('invite_joins', []))}"
+        "<b>⚙️ Joriy sozlamalar</b>\n\n"
+        f"• TARGET_CHANNEL: <code>{TARGET_CHANNEL or 'kiritilmagan'}</code>\n"
+        f"• SOURCE_CHAT_ID: <code>{SOURCE_CHAT_ID or 'kiritilmagan'}</code>\n"
+        f"• SOURCE_MESSAGE_ID: <code>{SOURCE_MESSAGE_ID if SOURCE_MESSAGE_ID else 'kiritilmagan'}</code>\n"
+        f"• Forward vaqti: <b>{POST_HOUR:02d}:{POST_MINUTE:02d}</b>\n"
+        f"• CONTEST_CHAT_ID: <code>{CONTEST_CHAT_ID or 'kiritilmagan'}</code>\n"
+        f"• Contest posti: <b>{MORNING_HOUR:02d}:{MORNING_MINUTE:02d}</b>\n"
+        f"• Winner vaqti: <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b>\n"
+        f"• INVITE_CHAT_ID: <code>{INVITE_CHAT_ID or 'kiritilmagan'}</code>\n"
+        f"• TOP 5 e'lon: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
+        f"• TZ: <b>{TZ}</b>\n"
+        f"• Faol skidkalar: <b>{len(STATE.get('discounts', {}))}</b>\n"
+        f"• Invite eventlar: <b>{len(STATE.get('invite_joins', []))}</b>"
     )
-    if update.message:
-        await update.message.reply_text(text)
+    await send_text(update, text, parse_mode=ParseMode.HTML)
 
 # ---------- FORWARD PART ----------
 async def do_forward(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -316,8 +368,7 @@ async def do_forward(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("Forward xatoligi: %s", e)
 
 async def testforward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message:
-        await update.message.reply_text("Test forward yuborilmoqda...")
+    await send_text(update, "Test forward yuborilmoqda...")
     await do_forward(context)
 
 async def debug_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -333,7 +384,7 @@ async def debug_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if hasattr(origin, "message_id"):
             lines.append(f"ORIGIN_MESSAGE_ID: {origin.message_id}")
     logger.info("DEBUG_FORWARD_INFO:\n%s", "\n".join(lines))
-    await update.message.reply_text("Forward info logga yozildi.")
+    await send_text(update, "Forward info logga yozildi.")
 
 # ---------- CONTEST PART ----------
 async def contest_post(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -377,9 +428,9 @@ async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logger.exception("Reaction handler xatoligi: %s", e)
 
-async def draw_winner(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def draw_winner(context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not CONTEST_CHAT_ID:
-        return
+        return False
 
     cleanup_expired_discounts()
     participant_ids = [int(x) for x in STATE.get("participants", [])]
@@ -390,14 +441,14 @@ async def draw_winner(context: ContextTypes.DEFAULT_TYPE) -> None:
             chat_id=CONTEST_CHAT_ID,
             text="Bugun hali hech kim reaksiya qoldirmadi. Ertaga yana urinib ko‘ring 🙂",
         )
-        return
+        return False
 
     if not eligible:
         await context.bot.send_message(
             chat_id=CONTEST_CHAT_ID,
             text="Bugungi ishtirokchilar orasida cooldown sababli g‘olib topilmadi. Ertaga yana urinib ko‘ring 🙂",
         )
-        return
+        return False
 
     winner_id = random.choice(eligible)
     now = tz_now()
@@ -421,6 +472,7 @@ async def draw_winner(context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+    return True
 
 # ---------- INVITE RACE PART ----------
 async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -428,15 +480,16 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user:
         return
     if not INVITE_CHAT_ID:
-        await update.message.reply_text("INVITE_CHAT_ID kiritilmagan.")
+        await send_text(update, "❌ INVITE_CHAT_ID kiritilmagan.")
         return
 
-    # oldin yaratilgan link bo'lsa o'shani qaytaradi
     old = STATE.get("invite_links", {}).get(str(user.id))
     if old and old.get("invite_link"):
-        await update.message.reply_text(
-            f"Sizning taklif havolangiz:\n{old['invite_link']}\n\n"
-            "Shu havola orqali kirganlar sizga yoziladi."
+        await send_text(
+            update,
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{old['invite_link']}</code>\n\n"
+            "Shu havola orqali kirganlar sizga yoziladi.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -452,13 +505,16 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "name": getattr(link, "name", None),
         }
         save_state()
-        await update.message.reply_text(
-            f"Sizning taklif havolangiz:\n{link.invite_link}\n\n"
-            "Shu havola orqali kirganlar sizga yoziladi."
+        await send_text(
+            update,
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{link.invite_link}</code>\n\n"
+            "Shu havola orqali kirganlar sizga yoziladi.",
+            parse_mode=ParseMode.HTML,
         )
     except Exception as e:
         logger.exception("myref xatoligi: %s", e)
-        await update.message.reply_text(
+        await send_text(
+            update,
             "Taklif havolasini yaratib bo‘lmadi. Botda guruh uchun invite huquqi bo‘lishi kerak."
         )
 
@@ -470,7 +526,6 @@ async def new_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     inviter = msg.from_user
-    # direct add bo'lsa inviter alohida user bo'ladi; oddiy self join bo'lsa memberning o'zi bo'lishi mumkin
     for member in msg.new_chat_members:
         if member.is_bot:
             continue
@@ -491,7 +546,6 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     old_status = getattr(cmu.old_chat_member, "status", None)
     new_status = getattr(cmu.new_chat_member, "status", None)
-
     joined_now = old_status in ("left", "kicked") and new_status in ("member", "administrator", "restricted")
     if not joined_now:
         return
@@ -500,7 +554,6 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not joined_user or joined_user.is_bot:
         return
 
-    # unique personal invite link orqali kirgan bo'lsa
     inv_link = getattr(cmu, "invite_link", None)
     if inv_link and getattr(inv_link, "name", None):
         name = inv_link.name or ""
@@ -532,7 +585,8 @@ async def post_top5(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_old_invite_events()
-    await update.message.reply_text(
+    await send_text(
+        update,
         invite_top5_text(24),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
@@ -541,17 +595,20 @@ async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------- ADMIN/INFO ----------
 async def postnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and ADMIN_USER_IDS and not is_admin(update.effective_user.id):
-        await update.message.reply_text("Bu buyruq faqat admin uchun.")
+        await send_text(update, "Bu bo‘lim faqat admin uchun.")
         return
     await contest_post(context)
-    await update.message.reply_text("Contest posti yuborildi.")
+    await send_text(update, "✅ Contest posti yuborildi.")
 
 async def drawnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and ADMIN_USER_IDS and not is_admin(update.effective_user.id):
-        await update.message.reply_text("Bu buyruq faqat admin uchun.")
+        await send_text(update, "Bu bo‘lim faqat admin uchun.")
         return
-    await draw_winner(context)
-    await update.message.reply_text("Winner tanlash ishga tushdi.")
+    ok = await draw_winner(context)
+    if ok:
+        await send_text(update, "✅ G‘olib tanlandi.")
+    else:
+        await send_text(update, "⚠️ G‘olib tanlab bo‘lmadi.")
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_expired_discounts()
@@ -559,25 +616,26 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_post_id = STATE.get("current_post_id")
     current_post_date = STATE.get("current_post_date") or "yo‘q"
     text = (
-        f"📌 Bugungi contest sanasi: {current_post_date}\n"
-        f"📝 Post ID: {current_post_id or 'yo‘q'}\n"
-        f"👥 Ishtirokchilar soni: {len(participants)}\n"
+        "📌 <b>Bugungi contest holati</b>\n\n"
+        f"• Sana: <b>{current_post_date}</b>\n"
+        f"• Post ID: <code>{current_post_id or 'yo‘q'}</code>\n"
+        f"• Ishtirokchilar soni: <b>{len(participants)}</b>\n"
     )
     if participants:
         preview = ", ".join(display_name_for(int(uid)) for uid in participants[:10])
-        text += f"Ishtirokchilar: {preview}"
+        text += f"\nIshtirokchilar: {preview}"
         if len(participants) > 10:
             text += " ..."
-    await update.message.reply_text(text)
+    await send_text(update, text, parse_mode=ParseMode.HTML)
 
 async def discounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or (ADMIN_USER_IDS and not is_admin(update.effective_user.id)):
-        await update.message.reply_text("Bu buyruq faqat admin uchun.")
+        await send_text(update, "Bu bo‘lim faqat admin uchun.")
         return
     cleanup_expired_discounts()
     items = STATE.get("discounts", {})
     if not items:
-        await update.message.reply_text("Faol skidkalar yo‘q.")
+        await send_text(update, "Faol skidkalar yo‘q.")
         return
 
     now = tz_now()
@@ -595,11 +653,36 @@ async def discounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"• {mention_html(int(uid), label)}\n"
             f"  └ {item['discount_percent']}% | max {format_money(item['max_amount'])} so'm | {hours} soat {minutes} daqiqa qoldi"
         )
-    await update.message.reply_text(
+    await send_text(
+        update,
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    data = query.data
+    if data == "postnow":
+        await postnow(update, context)
+    elif data == "drawnow":
+        await drawnow(update, context)
+    elif data == "today":
+        await today(update, context)
+    elif data == "discounts":
+        await discounts(update, context)
+    elif data == "myref":
+        await myref(update, context)
+    elif data == "top5":
+        await top5(update, context)
+    elif data == "status":
+        await status(update, context)
+    elif data == "help":
+        await help_menu(update, context)
 
 def main() -> None:
     if not BOT_TOKEN:
@@ -608,6 +691,7 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_menu))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("testforward", testforward))
     app.add_handler(CommandHandler("postnow", postnow))
@@ -616,12 +700,13 @@ def main() -> None:
     app.add_handler(CommandHandler("discounts", discounts))
     app.add_handler(CommandHandler("myref", myref))
     app.add_handler(CommandHandler("top5", top5))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
     app.add_handler(MessageHandler(filters.FORWARDED, debug_ids))
     app.add_handler(MessageReactionHandler(reaction_handler))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_members_handler))
     app.add_handler(ChatMemberHandler(chat_member_handler, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(ChatJoinRequestHandler(lambda u, c: None))  # update turini yoqish uchun
+    app.add_handler(ChatJoinRequestHandler(lambda u, c: None))
 
     jq = app.job_queue
     if jq is None:
@@ -649,10 +734,7 @@ def main() -> None:
         )
 
     logger.info("Bot ishga tushdi.")
-    app.run_polling(
-        close_loop=False,
-        allowed_updates=Update.ALL_TYPES,
-    )
+    app.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
