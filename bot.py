@@ -81,7 +81,7 @@ def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
-                InlineKeyboardButton("🥇 TOP 5", callback_data="top5"),
+                InlineKeyboardButton("🥇 TOP 20", callback_data="top20"),
             ],
             [
                 InlineKeyboardButton("⚙️ Status", callback_data="status"),
@@ -92,7 +92,7 @@ def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
         rows = [
             [
                 InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
-                InlineKeyboardButton("🥇 TOP 5", callback_data="top5"),
+                InlineKeyboardButton("🥇 TOP 20", callback_data="top20"),
             ],
             [
                 InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
@@ -110,7 +110,7 @@ Kerakli bo‘limni pastdagi tugmalardan tanlang. Admin va foydalanuvchi menyusi 
 • 06:00 da contest post
 • 20:00 da random g‘olib
 • 25% skidka nazorati
-• Referral orqali TOP 5
+• Referral orqali TOP 20
 
 👇 Tugmalardan foydalaning"""
 
@@ -306,12 +306,12 @@ def invite_top5_text(window_hours: int = 24) -> str:
     ranking = sorted(score.items(), key=lambda x: x[1], reverse=True)[:5]
     if not ranking:
         return (
-            "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 5</b>\n\n"
+            "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n\n"
             "Hozircha natija yo‘q.\n\n"
             "💡 Eng yaxshi usul: <b>/myref</b> tugmasi orqali shaxsiy taklif havolangizni olib tarqating."
         )
 
-    lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 5</b>\n"]
+    lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n"]
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
     for i, (uid, cnt) in enumerate(ranking):
         lines.append(f"{medals[i]} {labels.get(uid, uid)} — <b>{cnt} ta</b> odam")
@@ -363,7 +363,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Contest posti: <b>{MORNING_HOUR:02d}:{MORNING_MINUTE:02d}</b>\n"
         f"• Winner vaqti: <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b>\n"
         f"• INVITE_CHAT_ID: <code>{INVITE_CHAT_ID or 'kiritilmagan'}</code>\n"
-        f"• TOP 5 e'lon: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
+        f"• TOP 20 e'lon: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
         f"• TZ: <b>{TZ}</b>\n"
         f"• Faol skidkalar: <b>{len(STATE.get('discounts', {}))}</b>\n"
         f"• Invite eventlar: <b>{len(STATE.get('invite_joins', []))}</b>"
@@ -594,16 +594,16 @@ async def post_top5(context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_old_invite_events()
     await context.bot.send_message(
         chat_id=INVITE_CHAT_ID,
-        text=invite_top5_text(24),
+        text=invite_top20_text(24),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
 
-async def top5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def top20(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_old_invite_events()
     await send_text(
         update,
-        invite_top5_text(24),
+        invite_top20_text(24),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
@@ -698,8 +698,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await discounts(update, context)
     elif data == "myref":
         await myref(update, context)
-    elif data == "top5":
-        await top5(update, context)
+    elif data == "top20":
+        await top20(update, context)
     elif data == "status":
         await status(update, context)
     elif data == "help":
@@ -720,7 +720,7 @@ def main() -> None:
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("discounts", discounts))
     app.add_handler(CommandHandler("myref", myref))
-    app.add_handler(CommandHandler("top5", top5))
+    app.add_handler(CommandHandler("top20", top20))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     app.add_handler(MessageHandler(filters.FORWARDED, debug_ids))
