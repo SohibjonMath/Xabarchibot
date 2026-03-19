@@ -1,107 +1,125 @@
 import logging
 import os
 from datetime import time
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("OrzuMallDailyBot")
+logger = logging.getLogger("OrzuMallForwardBot")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip()
+TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip()   # masalan: @orzumalluz
 TZ = os.getenv("TZ", "Asia/Tashkent").strip()
+
+# Har kuni 07:30
 POST_HOUR = int(os.getenv("POST_HOUR", "7"))
 POST_MINUTE = int(os.getenv("POST_MINUTE", "30"))
 
-POST_TEXT = os.getenv(
-    "POST_TEXT",
-    "✨ OrzuMall — siz izlagan mahsulotlar shu yerda!\n\n"
-    "🛍 Original parfumeriya\n"
-    "💄 Koreys kosmetikasi\n"
-    "👩 Ayollar uchun kerakli mahsulotlar\n"
-    "🚚 Qulay buyurtma va tezkor aloqa\n\n"
-    "Quyidagi havolalar orqali bizga qo‘shiling 👇"
-).strip()
+# Eng muhim: qaysi chatdan va qaysi postni forward qilish
+SOURCE_CHAT_ID = os.getenv("SOURCE_CHAT_ID", "").strip()   # masalan: -1001234567890
+SOURCE_MESSAGE_ID = int(os.getenv("SOURCE_MESSAGE_ID", "0"))
 
-PHOTO_URL = os.getenv("PHOTO_URL", "").strip()
-VIDEO_URL = os.getenv("VIDEO_URL", "").strip()
+HELP_TEXT = """Salom. Men forward repost botman.
 
-BTN1_TEXT = os.getenv("BTN1_TEXT", "🛍 Kanal")
-BTN1_URL = os.getenv("BTN1_URL", "https://t.me/orzumalluz").strip()
-BTN2_TEXT = os.getenv("BTN2_TEXT", "👥 Guruh")
-BTN2_URL = os.getenv("BTN2_URL", "https://t.me/orzumallgroup").strip()
-BTN3_TEXT = os.getenv("BTN3_TEXT", "🤖 Bot")
-BTN3_URL = os.getenv("BTN3_URL", "https://t.me/OrzuMallUZ_bot").strip()
-BTN4_TEXT = os.getenv("BTN4_TEXT", "🌐 Sayt")
-BTN4_URL = os.getenv("BTN4_URL", "https://orzumall.uz").strip()
+Ishlash tartibi:
+1) SOURCE_CHAT_ID va SOURCE_MESSAGE_ID ni Variables ga yozasiz
+2) Botni maqsad kanalga admin qilasiz
+3) Har kuni avtomatik forward qiladi
 
-def build_keyboard():
-    rows = []
-    if BTN1_URL:
-        rows.append([InlineKeyboardButton(BTN1_TEXT, url=BTN1_URL)])
-    if BTN2_URL:
-        rows.append([InlineKeyboardButton(BTN2_TEXT, url=BTN2_URL)])
-    if BTN3_URL:
-        rows.append([InlineKeyboardButton(BTN3_TEXT, url=BTN3_URL)])
-    if BTN4_URL:
-        rows.append([InlineKeyboardButton(BTN4_TEXT, url=BTN4_URL)])
-    return InlineKeyboardMarkup(rows) if rows else None
+Buyruqlar:
+/start - yordam
+/status - joriy sozlamalar
+/testforward - hozir sinab ko‘radi
+"""
 
-async def publish_post(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(HELP_TEXT)
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    text = (
+        f"TARGET_CHANNEL: {TARGET_CHANNEL or 'kiritilmagan'}\n"
+        f"SOURCE_CHAT_ID: {SOURCE_CHAT_ID or 'kiritilmagan'}\n"
+        f"SOURCE_MESSAGE_ID: {SOURCE_MESSAGE_ID if SOURCE_MESSAGE_ID else 'kiritilmagan'}\n"
+        f"Vaqt: {POST_HOUR:02d}:{POST_MINUTE:02d}\n"
+        f"TZ: {TZ}"
+    )
+    await update.message.reply_text(text)
+
+async def do_forward(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not TARGET_CHANNEL:
         logger.error("TARGET_CHANNEL kiritilmagan.")
         return
-
-    keyboard = build_keyboard()
+    if not SOURCE_CHAT_ID or not SOURCE_MESSAGE_ID:
+        logger.error("SOURCE_CHAT_ID yoki SOURCE_MESSAGE_ID kiritilmagan.")
+        return
 
     try:
-        if VIDEO_URL:
-            await context.bot.send_video(
-                chat_id=TARGET_CHANNEL,
-                video=VIDEO_URL,
-                caption=POST_TEXT,
-                reply_markup=keyboard,
-            )
-        elif PHOTO_URL:
-            await context.bot.send_photo(
-                chat_id=TARGET_CHANNEL,
-                photo=PHOTO_URL,
-                caption=POST_TEXT,
-                reply_markup=keyboard,
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=TARGET_CHANNEL,
-                text=POST_TEXT,
-                reply_markup=keyboard,
-                disable_web_page_preview=False,
-            )
-        logger.info("Post yuborildi: %s", TARGET_CHANNEL)
-    except Exception:
-        logger.exception("Post yuborishda xato bo‘ldi.")
+        await context.bot.forward_message(
+            chat_id=TARGET_CHANNEL,
+            from_chat_id=SOURCE_CHAT_ID,
+            message_id=SOURCE_MESSAGE_ID,
+        )
+        logger.info(
+            "Forward muvaffaqiyatli yuborildi. source=%s message_id=%s target=%s",
+            SOURCE_CHAT_ID,
+            SOURCE_MESSAGE_ID,
+            TARGET_CHANNEL,
+        )
+    except Exception as e:
+        logger.exception("Forward xatoligi: %s", e)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def testforward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Test forward yuborilmoqda...")
+    await do_forward(context)
+
+async def debug_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Bu handler forward qilingan postning asl manba ID larini logga chiqaradi.
+    Foydalanish:
+    - Botga biror postni FORWARD qilib yuboring
+    - Railway loglarda ko‘rasiz
+    """
+    msg = update.message
+    if not msg:
+        return
+
+    lines = [
+        f"CURRENT_CHAT_ID: {msg.chat.id}",
+        f"CURRENT_MESSAGE_ID: {msg.message_id}",
+    ]
+
+    if msg.forward_origin:
+        origin = msg.forward_origin
+        lines.append(f"FORWARD_ORIGIN_TYPE: {type(origin).__name__}")
+
+        # Chatdan forward bo'lsa
+        if hasattr(origin, "chat") and origin.chat:
+            lines.append(f"ORIGIN_CHAT_ID: {origin.chat.id}")
+            lines.append(f"ORIGIN_CHAT_TITLE: {getattr(origin.chat, 'title', '')}")
+
+        # Asl xabarning message_id sini ayrim forwardlarda olish mumkin emas.
+        # Shuning uchun foydalanuvchi ko‘pincha source chat ichidagi post ID ni
+        # o‘zi aniqlashi kerak bo‘ladi.
+        if hasattr(origin, "message_id"):
+            lines.append(f"ORIGIN_MESSAGE_ID: {origin.message_id}")
+
+        if hasattr(origin, "date"):
+            lines.append(f"ORIGIN_DATE: {origin.date}")
+
+    logger.info("DEBUG_FORWARD_INFO:\n%s", "\n".join(lines))
+
     await update.message.reply_text(
-        "Salom. Men OrzuMall kunlik reklama botiman.\n\n"
-        "Buyruqlar:\n"
-        "/testpost — postni hozir yuboradi\n"
-        "/status — sozlamalarni ko‘rsatadi"
-    )
-
-async def testpost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Test post yuborilyapti...")
-    await publish_post(context)
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        f"TARGET_CHANNEL: {TARGET_CHANNEL or 'yo‘q'}\n"
-        f"Vaqt: {POST_HOUR:02d}:{POST_MINUTE:02d}\n"
-        f"TZ: {TZ}\n"
-        f"PHOTO_URL: {'bor' if PHOTO_URL else 'yo‘q'}\n"
-        f"VIDEO_URL: {'bor' if VIDEO_URL else 'yo‘q'}"
+        "Forward info logga yozildi. Railway logdan tekshiring."
     )
 
 def main() -> None:
@@ -111,19 +129,24 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("testpost", testpost))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("testforward", testforward))
+
+    # Botga forward qilingan postdan ID larni ko‘rish uchun
+    app.add_handler(MessageHandler(filters.FORWARDED, debug_ids))
 
     jq = app.job_queue
     if jq is None:
-        logger.warning("JobQueue yo‘q. requirements.txt ichida python-telegram-bot[job-queue] bo‘lishi kerak.")
+        logger.warning(
+            "JobQueue yo‘q. requirements.txt ichida python-telegram-bot[job-queue] bo‘lishi kerak."
+        )
     else:
         jq.run_daily(
-            publish_post,
+            do_forward,
             time=time(hour=POST_HOUR, minute=POST_MINUTE),
-            name="daily_post",
+            name="daily_forward_post",
         )
-        logger.info("Kunlik post yoqildi: %02d:%02d", POST_HOUR, POST_MINUTE)
+        logger.info("Kunlik forward yoqildi: %02d:%02d", POST_HOUR, POST_MINUTE)
 
     logger.info("Bot ishga tushdi.")
     app.run_polling(close_loop=False)
