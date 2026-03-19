@@ -277,7 +277,19 @@ def winner_post_text(uid: int) -> str:
         "📩 Buyurtma uchun admin bilan bog‘laning."
     )
 
-def invite_top5_text(window_hours: int = 24) -> str:
+def display_saved_user_label(uid: int, fallback: str | None = None) -> str:
+    meta = STATE.get("participants_meta", {}).get(str(uid), {})
+    username = meta.get("username")
+    first_name = meta.get("first_name")
+    if username:
+        return f"@{username}"
+    if first_name:
+        return first_name
+    if fallback:
+        return fallback
+    return str(uid)
+
+def invite_top20_text(window_hours: int = 24) -> str:
     now = tz_now()
     items = []
     seen_pairs = set()
@@ -290,7 +302,7 @@ def invite_top5_text(window_hours: int = 24) -> str:
         if ts <= now - timedelta(hours=window_hours):
             continue
 
-        key = (str(item["inviter_id"]), str(item["joined_id"]))
+        key = (str(item.get("inviter_id")), str(item.get("joined_id")))
         if key in seen_pairs:
             continue
         seen_pairs.add(key)
@@ -299,11 +311,18 @@ def invite_top5_text(window_hours: int = 24) -> str:
     score = {}
     labels = {}
     for item in items:
-        inviter_id = str(item["inviter_id"])
+        inviter_id = str(item.get("inviter_id"))
         score[inviter_id] = score.get(inviter_id, 0) + 1
-        labels[inviter_id] = item.get("inviter_label") or inviter_id
+        inviter_label = item.get("inviter_label")
+        if inviter_label and not str(inviter_label).isdigit():
+            labels[inviter_id] = inviter_label
+        else:
+            try:
+                labels[inviter_id] = display_saved_user_label(int(inviter_id), inviter_label)
+            except Exception:
+                labels[inviter_id] = inviter_label or inviter_id
 
-    ranking = sorted(score.items(), key=lambda x: x[1], reverse=True)[:5]
+    ranking = sorted(score.items(), key=lambda x: (-x[1], x[0]))[:20]
     if not ranking:
         return (
             "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n\n"
@@ -312,9 +331,10 @@ def invite_top5_text(window_hours: int = 24) -> str:
         )
 
     lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n"]
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-    for i, (uid, cnt) in enumerate(ranking):
-        lines.append(f"{medals[i]} {labels.get(uid, uid)} — <b>{cnt} ta</b> odam")
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (uid, cnt) in enumerate(ranking, start=1):
+        prefix = medals[i - 1] if i <= 3 else f"{i}."
+        lines.append(f"{prefix} {labels.get(uid, uid)} — <b>{cnt} ta</b> odam")
     lines.append("\n🎁 Sovrinlarni admin belgilaydi.")
     return "\n".join(lines)
 
@@ -588,7 +608,7 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             except Exception:
                 pass
 
-async def post_top5(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def post_top20(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not INVITE_CHAT_ID:
         return
     cleanup_old_invite_events()
@@ -749,9 +769,9 @@ def main() -> None:
             name="daily_contest_winner",
         )
         jq.run_daily(
-            post_top5,
+            post_top20,
             time=time(hour=TOP_HOUR, minute=TOP_MINUTE, tzinfo=ZoneInfo(TZ)),
-            name="daily_top5_post",
+            name="daily_top20_post",
         )
 
     logger.info("Bot ishga tushdi.")
