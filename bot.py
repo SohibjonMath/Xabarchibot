@@ -396,21 +396,6 @@ async def testforward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await send_text(update, "Test forward yuborilmoqda...")
     await do_forward(context)
 
-async def debug_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    if not msg:
-        return
-    lines = [f"CURRENT_CHAT_ID: {msg.chat.id}", f"CURRENT_MESSAGE_ID: {msg.message_id}"]
-    if msg.forward_origin:
-        origin = msg.forward_origin
-        lines.append(f"FORWARD_ORIGIN_TYPE: {type(origin).__name__}")
-        if hasattr(origin, "chat") and origin.chat:
-            lines.append(f"ORIGIN_CHAT_ID: {origin.chat.id}")
-        if hasattr(origin, "message_id"):
-            lines.append(f"ORIGIN_MESSAGE_ID: {origin.message_id}")
-    logger.info("DEBUG_FORWARD_INFO:\n%s", "\n".join(lines))
-    await send_text(update, "Forward info logga yozildi.")
-
 # ---------- CONTEST PART ----------
 async def contest_post(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not CONTEST_CHAT_ID:
@@ -733,7 +718,6 @@ def main() -> None:
     app.add_handler(CommandHandler("top20", top20))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    app.add_handler(MessageHandler(filters.FORWARDED, debug_ids))
     app.add_handler(MessageReactionHandler(reaction_handler))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_members_handler))
     app.add_handler(ChatMemberHandler(chat_member_handler, ChatMemberHandler.CHAT_MEMBER))
