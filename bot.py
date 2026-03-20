@@ -286,7 +286,7 @@ def winner_post_text(uid: int) -> str:
         "📩 Buyurtma uchun admin bilan bog‘laning."
     )
 
-def invite_top5_text(window_hours: int = 24) -> str:
+def invite_top20_text(window_hours: int = 24, viewer_uid: int | None = None) -> str:
     now = tz_now()
     items = []
     seen_pairs = set()
@@ -310,22 +310,54 @@ def invite_top5_text(window_hours: int = 24) -> str:
     for item in items:
         inviter_id = str(item["inviter_id"])
         score[inviter_id] = score.get(inviter_id, 0) + 1
-        labels[inviter_id] = item.get("inviter_label") or inviter_id
 
-    ranking = sorted(score.items(), key=lambda x: x[1], reverse=True)[:5]
+        inviter_label = item.get("inviter_label")
+        if inviter_label and not str(inviter_label).isdigit():
+            labels[inviter_id] = str(inviter_label)
+        else:
+            try:
+                labels[inviter_id] = display_saved_user_label(
+                    int(inviter_id),
+                    str(inviter_label) if inviter_label else None
+                )
+            except Exception:
+                labels[inviter_id] = str(inviter_label or inviter_id)
+
+    ranking = sorted(score.items(), key=lambda x: (-x[1], x[0]))[:20]
     if not ranking:
         return (
-            "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n\n"
-            "Hozircha natija yo‘q.\n\n"
+            "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>
+
+"
+            "Hozircha natija yo‘q.
+
+"
             "💡 Eng yaxshi usul: <b>/myref</b> tugmasi orqali shaxsiy taklif havolangizni olib tarqating."
         )
 
-    lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n"]
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-    for i, (uid, cnt) in enumerate(ranking):
-        lines.append(f"{medals[i]} {labels.get(uid, uid)} — <b>{cnt} ta</b> odam")
-    lines.append("\n🎁 Sovrinlarni admin belgilaydi.")
-    return "\n".join(lines)
+    lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>
+"]
+    badges = ["🥇", "🥈", "🥉"]
+
+    for i, (uid, cnt) in enumerate(ranking, start=1):
+        prefix = badges[i - 1] if i <= 3 else f"{i}."
+        raw_label = labels.get(uid, uid)
+        shown_label = label_with_you(str(raw_label), uid, viewer_uid)
+        safe_label = shown_label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        if str(raw_label).startswith("@"):
+            label_html = safe_label
+        else:
+            label_html = f'<a href="tg://user?id={uid}">{safe_label}</a>'
+
+        lines.append(f"{prefix} {label_html} — <b>{cnt} ta</b> odam")
+
+    lines.append("
+🎁 Sovrinlarni admin belgilaydi.
+
+🔗 Referral havolangiz uchun: /myref")
+    return "
+".join(lines)
 
 def register_invite_join(inviter_id: int, inviter_label: str, joined_id: int, joined_label: str, source: str) -> None:
     if inviter_id == joined_id:
