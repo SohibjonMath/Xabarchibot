@@ -1,781 +1,888 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
+import os
 import json
 import logging
-import os
-import random
-from datetime import datetime, time, timedelta
-from pathlib import Path
-from zoneinfo import ZoneInfo
-
 from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    WebAppInfo,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 from telegram.constants import ParseMode
+from telegram.error import Forbidden, BadRequest, NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
-    ChatJoinRequestHandler,
-    ChatMemberHandler,
     CommandHandler,
-    ContextTypes,
     MessageHandler,
-    MessageReactionHandler,
+    CallbackQueryHandler,
+    ContextTypes,
     filters,
 )
 
+# ================== CONFIG ==================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://xplusy.netlify.app/").strip()
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "2049065724").strip())
+
+OPERATORS_CSV = os.getenv("OPERATORS", "").strip()
+OPERATORS_JSON = os.getenv("OPERATORS_JSON", "").strip()
+OPERATOR_GROUP_ID_RAW = os.getenv("OPERATOR_GROUP_ID", "").strip()
+
+# ================== LOGGING ==================
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("OrzuMallMultiBot")
+logger = logging.getLogger("OrzuMallBot")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+# ================== KEYS ==================
+CHAT_MODE_KEY = "chat_mode"
+SEARCH_MODE_KEY = "search_mode"
+ACTIVE_CHAT_USER_KEY = "active_chat_user_id"
 
-# ---------- FORWARD SETTINGS ----------
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip()
-TZ = os.getenv("TZ", "Asia/Tashkent").strip()
-POST_HOUR = int(os.getenv("POST_HOUR", "7"))
-POST_MINUTE = int(os.getenv("POST_MINUTE", "30"))
-SOURCE_CHAT_ID = os.getenv("SOURCE_CHAT_ID", "").strip()
-SOURCE_MESSAGE_ID = int(os.getenv("SOURCE_MESSAGE_ID", "0"))
+SESSIONS_KEY = "sessions"
+USER_PROFILES_KEY = "user_profiles"
+NOTIF_MAP_KEY = "notif_map"
 
-# ---------- CONTEST SETTINGS ----------
-CONTEST_CHAT_ID = os.getenv("CONTEST_CHAT_ID", "").strip()
-MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
-MORNING_MINUTE = int(os.getenv("MORNING_MINUTE", "0"))
-WINNER_HOUR = int(os.getenv("WINNER_HOUR", "20"))
-WINNER_MINUTE = int(os.getenv("WINNER_MINUTE", "0"))
 
-# ---------- INVITE RACE SETTINGS ----------
-INVITE_CHAT_ID = os.getenv("INVITE_CHAT_ID", CONTEST_CHAT_ID).strip()
-TOP_HOUR = int(os.getenv("TOP_HOUR", "21"))
-TOP_MINUTE = int(os.getenv("TOP_MINUTE", "0"))
+def parse_operators() -> list[int]:
+    operators = set()
 
-ADMIN_USER_IDS = [
-    int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()
-]
-
-DISCOUNT_PERCENT = int(os.getenv("DISCOUNT_PERCENT", "25"))
-DISCOUNT_MAX_SUM = int(os.getenv("DISCOUNT_MAX_SUM", "1000000"))
-DISCOUNT_HOURS = int(os.getenv("DISCOUNT_HOURS", "72"))
-COOLDOWN_DAYS = int(os.getenv("WINNER_COOLDOWN_DAYS", "30"))
-
-STATE_DIR = Path(os.getenv("STATE_DIR", "./data"))
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-STATE_FILE = STATE_DIR / "contest_state.json"
-
-def main_menu_keyboard(user_id: int = 0) -> InlineKeyboardMarkup:
-    is_user_admin = user_id in ADMIN_USER_IDS
-
-    if is_user_admin:
-        rows = [
-            [
-                InlineKeyboardButton("🎁 Musobaqa posti", callback_data="postnow"),
-                InlineKeyboardButton("🏆 G‘olib tanlash", callback_data="drawnow"),
-            ],
-            [
-                InlineKeyboardButton("📊 Bugungi holat", callback_data="today"),
-                InlineKeyboardButton("💰 Faol skidkalar", callback_data="discounts"),
-            ],
-            [
-                InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
-                InlineKeyboardButton("🥇 TOP 20", callback_data="top20"),
-            ],
-            [
-                InlineKeyboardButton("⚙️ Status", callback_data="status"),
-                InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
-            ],
-        ]
-    else:
-        rows = [
-            [
-                InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
-                InlineKeyboardButton("🥇 TOP 20", callback_data="top20"),
-            ],
-            [
-                InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
-            ],
-        ]
-
-    return InlineKeyboardMarkup(rows)
-
-HELP_TEXT = """🤖 <b>OrzuMall Xabarchi</b>
-
-Kerakli bo‘limni pastdagi tugmalardan tanlang. Admin va foydalanuvchi menyusi alohida.
-
-<b>Asosiy funksiyalar:</b>
-• Kanalga avtomatik forward post
-• 06:00 da contest post
-• 20:00 da random g‘olib
-• 25% skidka nazorati
-• Referral orqali TOP 20
-
-👇 Tugmalardan foydalaning"""
-
-def tz_now() -> datetime:
-    return datetime.now(ZoneInfo(TZ))
-
-def format_money(n: int) -> str:
-    return f"{n:,}".replace(",", " ")
-
-def load_state() -> dict:
-    if STATE_FILE.exists():
+    if OPERATORS_JSON:
         try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            data = json.loads(OPERATORS_JSON)
+            for x in data:
+                operators.add(int(x))
         except Exception as e:
-            logger.exception("State o‘qishda xato: %s", e)
-    return {
-        "current_post_id": None,
-        "current_post_date": None,
-        "participants": [],
-        "participants_meta": {},
-        "discounts": {},
-        "winner_history": {},
-        "invite_links": {},
-        "invite_joins": [],
-    }
+            logger.warning("OPERATORS_JSON parse xato: %s", e)
 
-STATE = load_state()
+    if OPERATORS_CSV:
+        for x in OPERATORS_CSV.split(","):
+            x = x.strip()
+            if x:
+                try:
+                    operators.add(int(x))
+                except ValueError:
+                    logger.warning("OPERATORS CSV noto'g'ri qiymat: %s", x)
 
-def save_state() -> None:
-    STATE_FILE.write_text(
-        json.dumps(STATE, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    operators.add(ADMIN_CHAT_ID)
+    return sorted(operators)
+
+
+OPERATORS = parse_operators()
+OPERATOR_GROUP_ID = int(OPERATOR_GROUP_ID_RAW) if OPERATOR_GROUP_ID_RAW else None
+
+
+def is_operator(chat_id: int) -> bool:
+    return chat_id in OPERATORS
+
+
+def is_admin_or_operator(update: Update) -> bool:
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    return bool(chat_id and is_operator(chat_id))
+
+
+# ================== STORAGE HELPERS ==================
+def get_sessions(app) -> dict:
+    if SESSIONS_KEY not in app.bot_data:
+        app.bot_data[SESSIONS_KEY] = {}
+    return app.bot_data[SESSIONS_KEY]
+
+
+def get_profiles(app) -> dict:
+    if USER_PROFILES_KEY not in app.bot_data:
+        app.bot_data[USER_PROFILES_KEY] = {}
+    return app.bot_data[USER_PROFILES_KEY]
+
+
+def get_notif_map(app) -> dict:
+    if NOTIF_MAP_KEY not in app.bot_data:
+        app.bot_data[NOTIF_MAP_KEY] = {}
+    return app.bot_data[NOTIF_MAP_KEY]
+
+
+# ================== UI ==================
+def main_keyboard() -> ReplyKeyboardMarkup:
+    kb = [
+        [KeyboardButton("🛍 OrzuMall.uz", web_app=WebAppInfo(url=WEB_APP_URL))],
+        [KeyboardButton("🔎 Bizda yo‘q mahsulotni topish")],
+        [KeyboardButton("📞 Bog'lanish"), KeyboardButton("ℹ️ Ma'lumot")],
+        [KeyboardButton("💬 Chat")],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=kb,
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Tugmalardan tanlang…",
     )
 
-def mention_html(user_id: int, label: str) -> str:
-    safe = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return f'<a href="tg://user?id={user_id}">{safe}</a>'
 
-def display_name_for(uid: int) -> str:
-    meta = STATE.get("participants_meta", {}).get(str(uid), {})
-    username = meta.get("username")
-    first_name = meta.get("first_name")
-    if username:
-        return f"@{username}"
-    if first_name:
-        return first_name
-    return str(uid)
+def session_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🙋 Men javob beraman", callback_data=f"claim:{user_id}"),
+            InlineKeyboardButton("✅ Suhbatni yakunlash", callback_data=f"close:{user_id}"),
+        ]
+    ])
 
-def user_label(user) -> str:
-    if getattr(user, "username", None):
-        return f"@{user.username}"
-    return getattr(user, "first_name", None) or str(getattr(user, "id", ""))
 
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_USER_IDS
+ABOUT_TEXT = (
+    "<b>🛒 OrzuMall.uz</b> — qulay va tezkor online xaridlar markazi.\n\n"
+    "✅ Mahsulotlar\n"
+    "🚚 Yetkazib berish\n"
+    "💳 Xavfsiz to‘lov\n"
+    "📲 Barchasi bitta bot orqali\n\n"
+    "🔎 <b>Bizda yo‘q mahsulotni topish</b> tugmasi orqali rasm, video yoki nom yuboring — operator sizga taxminiy narx va yetkazib berish muddatini aytadi."
+)
 
-async def send_text(update: Update, text: str, **kwargs):
-    if update.callback_query:
-        await update.callback_query.message.reply_text(text, **kwargs)
-    elif update.message:
-        await update.message.reply_text(text, **kwargs)
+CONTACT_TEXT = (
+    "<b>📞 Bog'lanish</b>\n"
+    "Bot: @OrzuMallUZ_bot\n"
+    "Telefon: +998 XX XXX XX XX\n"
+    "Ish vaqti: 09:00–21:00"
+)
 
-async def send_or_edit_menu(update: Update, text: str):
-    user = update.effective_user
-    markup = main_menu_keyboard(user.id if user else 0)
-    if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(
-                text=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-                disable_web_page_preview=True,
-            )
-            return
-        except Exception:
-            pass
-    if update.message:
-        await update.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-            disable_web_page_preview=True,
-        )
-    elif update.callback_query:
-        await update.callback_query.message.reply_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=markup,
-            disable_web_page_preview=True,
-        )
+WELCOME_TEXT = (
+    "Assalomu alaykum! 👋\n"
+    "OrzuMall botiga xush kelibsiz.\n\n"
+    "Pastdagi tugmalar orqali davom eting 👇"
+)
 
-def cleanup_expired_discounts() -> None:
-    now = tz_now()
-    discounts = STATE.get("discounts", {})
-    to_delete = []
-    for uid, item in discounts.items():
-        expires_at = item.get("expires_at")
-        used = item.get("used", False)
-        if used:
-            to_delete.append(uid)
-            continue
-        try:
-            dt = datetime.fromisoformat(expires_at)
-            if dt <= now:
-                to_delete.append(uid)
-        except Exception:
-            to_delete.append(uid)
-    for uid in to_delete:
-        discounts.pop(uid, None)
-    if to_delete:
-        save_state()
+SEARCH_INTRO_TEXT = (
+    "<b>🔎 Bizda yo‘q mahsulotni topish</b>\n\n"
+    "Mahsulot rasmi, videosi yoki nomini yuboring.\n"
+    "Operator sizga: \n"
+    "• taxminiy umumiy summa\n"
+    "• tezkor yetkazib berish vaqti\n"
+    "• olib kelish imkoniyati\n"
+    "haqida javob beradi.\n\n"
+    "Qancha ko‘p ma'lumot bersangiz, shuncha tez aniq javob olasiz."
+)
 
-def cleanup_old_invite_events() -> None:
-    now = tz_now()
-    keep = []
-    for item in STATE.get("invite_joins", []):
-        try:
-            ts = datetime.fromisoformat(item["ts"])
-            if ts > now - timedelta(days=7):
-                keep.append(item)
-        except Exception:
-            pass
-    if len(keep) != len(STATE.get("invite_joins", [])):
-        STATE["invite_joins"] = keep
-        save_state()
 
-def already_recent_winner(user_id: int) -> bool:
-    raw = STATE.get("winner_history", {}).get(str(user_id))
-    if not raw:
-        return False
-    try:
-        dt = datetime.fromisoformat(raw)
-        return dt > (tz_now() - timedelta(days=COOLDOWN_DAYS))
-    except Exception:
-        return False
-
-def contest_post_text() -> str:
-    return (
-        "🎁 <b>BUGUNGI MUSOBAQA BOSHLANDI!</b>\n\n"
-        f"Bugun 1 ta omadli ishtirokchi:\n"
-        f"🔥 <b>{DISCOUNT_PERCENT}% SKIDKA</b> yutadi!\n\n"
-        "<b>Qatnashish shartlari:</b>\n"
-        "1️⃣ Shu postga <b>reaksiya</b> qoldiring\n"
-        "2️⃣ Guruhda qoling\n\n"
-        f"⏰ <b>Natija bugun {WINNER_HOUR:02d}:{WINNER_MINUTE:02d} da</b> e'lon qilinadi\n\n"
-        "📌 <b>Skidka shartlari:</b>\n"
-        "• Faqat <b>1 martalik</b>\n"
-        f"• Maksimal <b>{format_money(DISCOUNT_MAX_SUM)} so'mgacha</b> bo'lgan xaridlar uchun amal qiladi\n"
-        f"• Skidka <b>{DISCOUNT_HOURS} soat</b> amal qiladi\n"
-        "• Random tarzda 1 ta ishtirokchi tanlanadi\n\n"
-        "💬 Omad hammaga!"
-    )
-
-def winner_post_text(uid: int) -> str:
-    label = display_name_for(uid)
-    return (
-        "🏆 <b>BUGUNGI G‘OLIB ANIQLANDI!</b>\n\n"
-        f"🎉 Tabriklaymiz: {mention_html(uid, label)}\n\n"
-        f"Sizga <b>{DISCOUNT_PERCENT}% skidka</b> taqdim etildi.\n\n"
-        "📌 <b>Shartlar:</b>\n"
-        "• Faqat <b>1 martalik</b>\n"
-        f"• Maksimal <b>{format_money(DISCOUNT_MAX_SUM)} so'mgacha</b> bo'lgan xaridlar uchun\n"
-        f"• <b>{DISCOUNT_HOURS} soat</b> amal qiladi\n\n"
-        "📩 Buyurtma uchun admin bilan bog‘laning."
-    )
-
-def display_saved_user_label(uid: int, fallback: str | None = None) -> str:
-    meta = STATE.get("participants_meta", {}).get(str(uid), {})
-    username = meta.get("username")
-    first_name = meta.get("first_name")
-    if username:
-        return f"@{username}"
-    if first_name:
-        return first_name
-    if fallback:
-        return fallback
-    return str(uid)
-
-def invite_top20_text(window_hours: int = 24) -> str:
-    now = tz_now()
-    items = []
-    seen_pairs = set()
-
-    for item in STATE.get("invite_joins", []):
-        try:
-            ts = datetime.fromisoformat(item["ts"])
-        except Exception:
-            continue
-        if ts <= now - timedelta(hours=window_hours):
-            continue
-
-        key = (str(item.get("inviter_id")), str(item.get("joined_id")))
-        if key in seen_pairs:
-            continue
-        seen_pairs.add(key)
-        items.append(item)
-
-    score = {}
-    labels = {}
-    for item in items:
-        inviter_id = str(item.get("inviter_id"))
-        score[inviter_id] = score.get(inviter_id, 0) + 1
-        inviter_label = item.get("inviter_label")
-        if inviter_label and not str(inviter_label).isdigit():
-            labels[inviter_id] = inviter_label
-        else:
-            try:
-                labels[inviter_id] = display_saved_user_label(int(inviter_id), inviter_label)
-            except Exception:
-                labels[inviter_id] = inviter_label or inviter_id
-
-    ranking = sorted(score.items(), key=lambda x: (-x[1], x[0]))[:20]
-    if not ranking:
-        return (
-            "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n\n"
-            "Hozircha natija yo‘q.\n\n"
-            "💡 Eng yaxshi usul: <b>/myref</b> tugmasi orqali shaxsiy taklif havolangizni olib tarqating."
-        )
-
-    lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n"]
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (uid, cnt) in enumerate(ranking, start=1):
-        prefix = medals[i - 1] if i <= 3 else f"{i}."
-        lines.append(f"{prefix} {labels.get(uid, uid)} — <b>{cnt} ta</b> odam")
-    lines.append("\n🎁 Sovrinlarni admin belgilaydi.")
-    return "\n".join(lines)
-
-def register_invite_join(inviter_id: int, inviter_label: str, joined_id: int, joined_label: str, source: str) -> None:
-    if inviter_id == joined_id:
-        return
-
-    now_iso = tz_now().isoformat()
-    key = (str(inviter_id), str(joined_id))
-
-    for item in reversed(STATE.get("invite_joins", [])):
-        if (str(item.get("inviter_id")), str(item.get("joined_id"))) == key:
-            try:
-                ts = datetime.fromisoformat(item["ts"])
-                if ts > tz_now() - timedelta(days=1):
-                    return
-            except Exception:
-                pass
-
-    STATE.setdefault("invite_joins", []).append({
-        "ts": now_iso,
-        "inviter_id": inviter_id,
-        "joined_id": joined_id,
-        "source": source,
-        "joined_label": joined_label,
-        "inviter_label": inviter_label,
-    })
-    save_state()
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_or_edit_menu(update, HELP_TEXT)
-
-async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_or_edit_menu(update, HELP_TEXT)
-
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cleanup_expired_discounts()
-    cleanup_old_invite_events()
-    text = (
-        "<b>⚙️ Joriy sozlamalar</b>\n\n"
-        f"• TARGET_CHANNEL: <code>{TARGET_CHANNEL or 'kiritilmagan'}</code>\n"
-        f"• SOURCE_CHAT_ID: <code>{SOURCE_CHAT_ID or 'kiritilmagan'}</code>\n"
-        f"• SOURCE_MESSAGE_ID: <code>{SOURCE_MESSAGE_ID if SOURCE_MESSAGE_ID else 'kiritilmagan'}</code>\n"
-        f"• Forward vaqti: <b>{POST_HOUR:02d}:{POST_MINUTE:02d}</b>\n"
-        f"• CONTEST_CHAT_ID: <code>{CONTEST_CHAT_ID or 'kiritilmagan'}</code>\n"
-        f"• Contest posti: <b>{MORNING_HOUR:02d}:{MORNING_MINUTE:02d}</b>\n"
-        f"• Winner vaqti: <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b>\n"
-        f"• INVITE_CHAT_ID: <code>{INVITE_CHAT_ID or 'kiritilmagan'}</code>\n"
-        f"• TOP 20 e'lon: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
-        f"• TZ: <b>{TZ}</b>\n"
-        f"• Faol skidkalar: <b>{len(STATE.get('discounts', {}))}</b>\n"
-        f"• Invite eventlar: <b>{len(STATE.get('invite_joins', []))}</b>"
-    )
-    await send_text(update, text, parse_mode=ParseMode.HTML)
-
-# ---------- FORWARD PART ----------
-async def do_forward(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not TARGET_CHANNEL or not SOURCE_CHAT_ID or not SOURCE_MESSAGE_ID:
-        return
-    try:
-        await context.bot.forward_message(
-            chat_id=TARGET_CHANNEL,
-            from_chat_id=SOURCE_CHAT_ID,
-            message_id=SOURCE_MESSAGE_ID,
-        )
-    except Exception as e:
-        logger.exception("Forward xatoligi: %s", e)
-
-async def testforward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_text(update, "Test forward yuborilmoqda...")
-    await do_forward(context)
-
-async def debug_ids(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    if not msg:
-        return
-    lines = [f"CURRENT_CHAT_ID: {msg.chat.id}", f"CURRENT_MESSAGE_ID: {msg.message_id}"]
-    if msg.forward_origin:
-        origin = msg.forward_origin
-        lines.append(f"FORWARD_ORIGIN_TYPE: {type(origin).__name__}")
-        if hasattr(origin, "chat") and origin.chat:
-            lines.append(f"ORIGIN_CHAT_ID: {origin.chat.id}")
-        if hasattr(origin, "message_id"):
-            lines.append(f"ORIGIN_MESSAGE_ID: {origin.message_id}")
-    logger.info("DEBUG_FORWARD_INFO:\n%s", "\n".join(lines))
-    await send_text(update, "Forward info logga yozildi.")
-
-# ---------- CONTEST PART ----------
-async def contest_post(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not CONTEST_CHAT_ID:
-        return
-    cleanup_expired_discounts()
-    STATE["participants"] = []
-    STATE["participants_meta"] = {}
-    STATE["current_post_date"] = tz_now().date().isoformat()
-    msg = await context.bot.send_message(
-        chat_id=CONTEST_CHAT_ID,
-        text=contest_post_text(),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-    STATE["current_post_id"] = msg.message_id
-    save_state()
-
-async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        reaction = update.message_reaction
-        if not reaction:
-            return
-        if str(reaction.chat.id) != str(CONTEST_CHAT_ID):
-            return
-        current_post_id = STATE.get("current_post_id")
-        if not current_post_id or reaction.message_id != current_post_id:
-            return
-        actor = reaction.user
-        if not actor or actor.is_bot:
-            return
-        uid = actor.id
-        participants = set(STATE.get("participants", []))
-        participants.add(uid)
-        STATE["participants"] = list(participants)
-        STATE.setdefault("participants_meta", {})[str(uid)] = {
-            "username": actor.username,
-            "first_name": actor.first_name,
-        }
-        save_state()
-    except Exception as e:
-        logger.exception("Reaction handler xatoligi: %s", e)
-
-async def draw_winner(context: ContextTypes.DEFAULT_TYPE) -> bool:
-    if not CONTEST_CHAT_ID:
-        return False
-
-    cleanup_expired_discounts()
-    participant_ids = [int(x) for x in STATE.get("participants", [])]
-    eligible = [uid for uid in participant_ids if not already_recent_winner(uid)]
-
-    if not participant_ids:
-        await context.bot.send_message(
-            chat_id=CONTEST_CHAT_ID,
-            text="Bugun hali hech kim reaksiya qoldirmadi. Ertaga yana urinib ko‘ring 🙂",
-        )
-        return False
-
-    if not eligible:
-        await context.bot.send_message(
-            chat_id=CONTEST_CHAT_ID,
-            text="Bugungi ishtirokchilar orasida cooldown sababli g‘olib topilmadi. Ertaga yana urinib ko‘ring 🙂",
-        )
-        return False
-
-    winner_id = random.choice(eligible)
-    now = tz_now()
-    expires_at = now + timedelta(hours=DISCOUNT_HOURS)
-
-    STATE.setdefault("discounts", {})[str(winner_id)] = {
-        "user_id": winner_id,
-        "label": display_name_for(winner_id),
-        "discount_percent": DISCOUNT_PERCENT,
-        "max_amount": DISCOUNT_MAX_SUM,
-        "issued_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "used": False,
-    }
-    STATE.setdefault("winner_history", {})[str(winner_id)] = now.isoformat()
-    save_state()
-
-    await context.bot.send_message(
-        chat_id=CONTEST_CHAT_ID,
-        text=winner_post_text(winner_id),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-    return True
-
-# ---------- INVITE RACE PART ----------
-async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
+# ================== HELPERS ==================
+def user_display_name(user) -> str:
     if not user:
-        return
-    if not INVITE_CHAT_ID:
-        await send_text(update, "❌ INVITE_CHAT_ID kiritilmagan.")
-        return
+        return "User"
+    name = " ".join(filter(None, [getattr(user, "first_name", None), getattr(user, "last_name", None)])).strip()
+    return name or getattr(user, "full_name", None) or "User"
 
-    old = STATE.get("invite_links", {}).get(str(user.id))
-    if old and old.get("invite_link"):
-        await send_text(
-            update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{old['invite_link']}</code>\n\n"
-            "Shu havola orqali kirganlar sizga yoziladi.",
-            parse_mode=ParseMode.HTML,
-        )
-        return
 
-    try:
-        link = await context.bot.create_chat_invite_link(
-            chat_id=INVITE_CHAT_ID,
-            name=f"ref_{user.id}",
-            creates_join_request=False,
-        )
-        STATE.setdefault("invite_links", {})[str(user.id)] = {
-            "invite_link": link.invite_link,
-            "created_at": tz_now().isoformat(),
-            "name": getattr(link, "name", None),
-        }
-        save_state()
-        await send_text(
-            update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{link.invite_link}</code>\n\n"
-            "Shu havola orqali kirganlar sizga yoziladi.",
-            parse_mode=ParseMode.HTML,
-        )
-    except Exception as e:
-        logger.exception("myref xatoligi: %s", e)
-        await send_text(
-            update,
-            "Taklif havolasini yaratib bo‘lmadi. Botda guruh uchun invite huquqi bo‘lishi kerak."
-        )
+def profile_text(profile: dict) -> str:
+    name = profile.get("full_name", "Noma'lum")
+    username = profile.get("username") or "yo‘q"
+    return f"👤 Ism: {name}\n🔗 Username: {username}"
 
-async def new_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    if not msg or str(msg.chat.id) != str(INVITE_CHAT_ID):
-        return
-    if not msg.new_chat_members:
-        return
 
-    inviter = msg.from_user
-    for member in msg.new_chat_members:
-        if member.is_bot:
-            continue
+def session_status_text(session: dict) -> str:
+    status = session.get("status", "waiting")
+    operator_id = session.get("operator_id")
 
-        if inviter and inviter.id != member.id and not inviter.is_bot:
-            register_invite_join(
-                inviter_id=inviter.id,
-                inviter_label=user_label(inviter),
-                joined_id=member.id,
-                joined_label=user_label(member),
-                source="direct_add",
-            )
+    if status == "assigned" and operator_id:
+        return f"🟢 Holat: operator biriktirilgan (<code>{operator_id}</code>)"
+    if status == "closed":
+        return "⚪ Holat: yopilgan"
+    return "🟡 Holat: navbatda"
 
-async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cmu = update.chat_member
-    if not cmu or str(cmu.chat.id) != str(INVITE_CHAT_ID):
-        return
 
-    old_status = getattr(cmu.old_chat_member, "status", None)
-    new_status = getattr(cmu.new_chat_member, "status", None)
-    joined_now = old_status in ("left", "kicked") and new_status in ("member", "administrator", "restricted")
-    if not joined_now:
-        return
+def session_topic_label(session: dict) -> str:
+    topic = session.get("topic", "chat")
+    if topic == "search_request":
+        return "🔎 So‘rov turi: bizda yo‘q mahsulotni topish"
+    return "💬 So‘rov turi: oddiy chat"
 
-    joined_user = cmu.new_chat_member.user
-    if not joined_user or joined_user.is_bot:
-        return
 
-    inv_link = getattr(cmu, "invite_link", None)
-    if inv_link and getattr(inv_link, "name", None):
-        name = inv_link.name or ""
-        if name.startswith("ref_"):
-            try:
-                inviter_id = int(name.split("_", 1)[1])
-                if inviter_id != joined_user.id:
-                    register_invite_join(
-                        inviter_id=inviter_id,
-                        inviter_label=display_name_for(inviter_id),
-                        joined_id=joined_user.id,
-                        joined_label=user_label(joined_user),
-                        source="personal_link",
-                    )
-                    return
-            except Exception:
-                pass
+def build_operator_ticket_text(session: dict, profile: dict | None = None) -> str:
+    user_id = session["user_id"]
+    user_name = session.get("user_name", "User")
+    username = session.get("username")
+    status_line = session_status_text(session)
 
-async def post_top20(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not INVITE_CHAT_ID:
-        return
-    cleanup_old_invite_events()
-    await context.bot.send_message(
-        chat_id=INVITE_CHAT_ID,
-        text=invite_top20_text(24),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    uname = f"@{username}" if username else "yo‘q"
+    last_messages = session.get("messages", [])[-5:]
 
-async def top20(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cleanup_old_invite_events()
-    await send_text(
-        update,
-        invite_top20_text(24),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    body = [
+        "<b>💬 Yangi / faol chat</b>",
+        session_topic_label(session),
+        f"👤 {user_name}",
+        f"🔗 Username: {uname}",
+        f"🆔 USER_ID: <code>{user_id}</code>",
+    ]
 
-# ---------- ADMIN/INFO ----------
-async def postnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user and ADMIN_USER_IDS and not is_admin(update.effective_user.id):
-        await send_text(update, "Bu bo‘lim faqat admin uchun.")
-        return
-    await contest_post(context)
-    await send_text(update, "✅ Contest posti yuborildi.")
+    if profile:
+        body.append(f"ℹ️ Profil: {profile_text(profile).replace(chr(10), ' | ')}")
 
-async def drawnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user and ADMIN_USER_IDS and not is_admin(update.effective_user.id):
-        await send_text(update, "Bu bo‘lim faqat admin uchun.")
-        return
-    ok = await draw_winner(context)
-    if ok:
-        await send_text(update, "✅ G‘olib tanlandi.")
+    body += [status_line, "", "<b>Oxirgi xabarlar:</b>"]
+
+    if last_messages:
+        for m in last_messages:
+            body.append(f"• {m}")
     else:
-        await send_text(update, "⚠️ G‘olib tanlab bo‘lmadi.")
+        body.append("• Hozircha xabar yo‘q")
 
-async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cleanup_expired_discounts()
-    participants = STATE.get("participants", [])
-    current_post_id = STATE.get("current_post_id")
-    current_post_date = STATE.get("current_post_date") or "yo‘q"
-    text = (
-        "📌 <b>Bugungi contest holati</b>\n\n"
-        f"• Sana: <b>{current_post_date}</b>\n"
-        f"• Post ID: <code>{current_post_id or 'yo‘q'}</code>\n"
-        f"• Ishtirokchilar soni: <b>{len(participants)}</b>\n"
-    )
-    if participants:
-        preview = ", ".join(display_name_for(int(uid)) for uid in participants[:10])
-        text += f"\nIshtirokchilar: {preview}"
-        if len(participants) > 10:
-            text += " ..."
-    await send_text(update, text, parse_mode=ParseMode.HTML)
+    if session.get("topic") == "search_request":
+        body += ["", "<b>Operator uchun:</b>", "• Mahsulotni toping", "• Umumiy summani yozing", "• Yetkazib berish vaqtini ayting"]
 
-async def discounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.effective_user or (ADMIN_USER_IDS and not is_admin(update.effective_user.id)):
-        await send_text(update, "Bu bo‘lim faqat admin uchun.")
-        return
-    cleanup_expired_discounts()
-    items = STATE.get("discounts", {})
-    if not items:
-        await send_text(update, "Faol skidkalar yo‘q.")
-        return
+    body.append("")
+    body.append("<i>Operator tugma orqali chatni olishi yoki yopishi mumkin</i>")
+    return "\n".join(body)
 
-    now = tz_now()
-    lines = ["📊 <b>Faol skidkalar</b>\n"]
-    for uid, item in items.items():
-        exp = datetime.fromisoformat(item["expires_at"])
-        remain = exp - now
-        total_sec = int(remain.total_seconds())
-        if total_sec <= 0:
-            continue
-        hours = total_sec // 3600
-        minutes = (total_sec % 3600) // 60
-        label = item.get("label") or display_name_for(int(uid))
-        lines.append(
-            f"• {mention_html(int(uid), label)}\n"
-            f"  └ {item['discount_percent']}% | max {format_money(item['max_amount'])} so'm | {hours} soat {minutes} daqiqa qoldi"
+
+def ensure_user_session(sessions: dict, user, profile: dict, topic: str = "chat") -> dict:
+    user_id = user.id
+    session = sessions.get(user_id)
+
+    if not session or session.get("status") == "closed":
+        sessions[user_id] = {
+            "user_id": user_id,
+            "user_name": profile.get("full_name") or user_display_name(user),
+            "username": user.username,
+            "status": "waiting",
+            "operator_id": None,
+            "messages": [],
+            "topic": topic,
+        }
+        return sessions[user_id]
+
+    if topic == "search_request":
+        session["topic"] = "search_request"
+    elif "topic" not in session:
+        session["topic"] = "chat"
+
+    return session
+
+
+# ================== SAFE SEND ==================
+async def safe_send_message(bot, chat_id: int, text: str, **kwargs):
+    try:
+        return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+    except Forbidden:
+        logger.warning("Forbidden: chat_id=%s bot blocked or no permission.", chat_id)
+        return None
+    except BadRequest as e:
+        logger.error("BadRequest: chat_id=%s error=%s", chat_id, e)
+        return None
+    except RetryAfter as e:
+        logger.warning("RetryAfter: %s seconds. chat_id=%s", e.retry_after, chat_id)
+        return None
+    except (TimedOut, NetworkError) as e:
+        logger.warning("Network/Timeout: chat_id=%s error=%s", chat_id, e)
+        return None
+    except Exception as e:
+        logger.exception("Unexpected error while sending message: chat_id=%s error=%s", chat_id, e)
+        return None
+
+
+async def safe_reply(update: Update, text: str, **kwargs):
+    if not update.message:
+        return None
+    try:
+        return await update.message.reply_text(text, **kwargs)
+    except Forbidden:
+        logger.warning("Forbidden on reply: user blocked bot.")
+        return None
+    except BadRequest as e:
+        logger.error("BadRequest on reply: %s", e)
+        return None
+    except (TimedOut, NetworkError) as e:
+        logger.warning("Network/Timeout on reply: %s", e)
+        return None
+    except Exception as e:
+        logger.exception("Unexpected error on reply: %s", e)
+        return None
+
+
+# ================== OPERATOR NOTIFY ==================
+async def notify_operators(context: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, user_id: int | None = None):
+    notif_map = get_notif_map(context.application)
+
+    if OPERATOR_GROUP_ID:
+        sent = await safe_send_message(
+            context.bot,
+            OPERATOR_GROUP_ID,
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
         )
-    await send_text(
-        update,
-        "\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query:
+        if sent and user_id:
+            notif_map[f"{OPERATOR_GROUP_ID}:{sent.message_id}"] = user_id
         return
+
+    for op_id in OPERATORS:
+        sent = await safe_send_message(
+            context.bot,
+            op_id,
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+        )
+        if sent and user_id:
+            notif_map[f"{op_id}:{sent.message_id}"] = user_id
+
+
+async def notify_operators_media(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    caption_text: str,
+    profile: dict | None = None,
+    photo=None,
+    video=None,
+    audio=None,
+    voice=None,
+    document=None,
+):
+    reply_markup = session_keyboard(user_id)
+    full_caption = caption_text
+    if profile:
+        full_caption += "\n" + profile_text(profile)
+
+    notif_map = get_notif_map(context.application)
+
+    async def _send_media(target_chat_id: int):
+        if photo:
+            return await context.bot.send_photo(target_chat_id, photo=photo, caption=full_caption[:1024], parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        if video:
+            return await context.bot.send_video(target_chat_id, video=video, caption=full_caption[:1024], parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        if audio:
+            return await context.bot.send_audio(target_chat_id, audio=audio, caption=full_caption[:1024], parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        if voice:
+            return await context.bot.send_voice(target_chat_id, voice=voice, caption=full_caption[:1024], parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        if document:
+            return await context.bot.send_document(target_chat_id, document=document, caption=full_caption[:1024], parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        return None
+
+    if OPERATOR_GROUP_ID:
+        try:
+            sent = await _send_media(OPERATOR_GROUP_ID)
+            if sent:
+                notif_map[f"{OPERATOR_GROUP_ID}:{sent.message_id}"] = user_id
+        except Exception as e:
+            logger.exception("Operator group media yuborilmadi: %s", e)
+        return
+
+    for op_id in OPERATORS:
+        try:
+            sent = await _send_media(op_id)
+            if sent:
+                notif_map[f"{op_id}:{sent.message_id}"] = user_id
+        except Exception as e:
+            logger.exception("Operatorga media yuborilmadi: %s", e)
+
+
+# ================== SUPPORT COMMANDS ==================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[CHAT_MODE_KEY] = False
+    context.user_data[SEARCH_MODE_KEY] = False
+    await safe_reply(update, WELCOME_TEXT, reply_markup=main_keyboard())
+
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await safe_reply(update, "Menyu 👇", reply_markup=main_keyboard())
+
+
+async def chat_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_chat or not update.effective_user:
+        return
+
+    user_id = update.effective_user.id
+    profiles = get_profiles(context.application)
+    profile = profiles.get(user_id)
+    if not profile:
+        profile = {
+            "full_name": user_display_name(update.effective_user),
+            "username": f"@{update.effective_user.username}" if update.effective_user.username else "yo‘q",
+        }
+        profiles[user_id] = profile
+
+    context.user_data[SEARCH_MODE_KEY] = False
+
+    sessions = get_sessions(context.application)
+    session = ensure_user_session(sessions, update.effective_user, profile, topic="chat")
+
+    if session.get("status") in ("waiting", "assigned"):
+        session["topic"] = "chat"
+        context.user_data[CHAT_MODE_KEY] = True
+        await safe_reply(update, "💬 Chat rejimi yoqildi.\nSavolingizni yozing, operatorga yuboraman.", reply_markup=main_keyboard())
+
+
+async def search_product_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_chat or not update.effective_user:
+        return
+
+    user_id = update.effective_user.id
+    profiles = get_profiles(context.application)
+    profile = profiles.get(user_id)
+    if not profile:
+        profile = {
+            "full_name": user_display_name(update.effective_user),
+            "username": f"@{update.effective_user.username}" if update.effective_user.username else "yo‘q",
+        }
+        profiles[user_id] = profile
+
+    context.user_data[CHAT_MODE_KEY] = False
+
+    sessions = get_sessions(context.application)
+    session = ensure_user_session(sessions, update.effective_user, profile, topic="search_request")
+    session["topic"] = "search_request"
+    if session.get("status") == "closed":
+        session["status"] = "waiting"
+        session["operator_id"] = None
+
+    context.user_data[SEARCH_MODE_KEY] = True
+    await safe_reply(update, SEARCH_INTRO_TEXT, parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+
+
+async def chat_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[CHAT_MODE_KEY] = False
+    context.user_data[SEARCH_MODE_KEY] = False
+    await safe_reply(update, "✅ Chat rejimi o‘chirildi.", reply_markup=main_keyboard())
+
+
+async def queue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_or_operator(update):
+        return
+
+    sessions = get_sessions(context.application)
+    waiting = [s for s in sessions.values() if s.get("status") == "waiting"]
+
+    if not waiting:
+        await safe_reply(update, "Navbatda chat yo‘q.")
+        return
+
+    lines = ["<b>🟡 Navbatdagi chatlar:</b>"]
+    for s in waiting[:20]:
+        topic_icon = "🔎" if s.get("topic") == "search_request" else "💬"
+        lines.append(f"• {topic_icon} {s.get('user_name', 'User')} — <code>{s['user_id']}</code>")
+
+    await safe_reply(update, "\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def my_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_or_operator(update):
+        return
+
+    op_id = update.effective_chat.id
+    sessions = get_sessions(context.application)
+    mine = [s for s in sessions.values() if s.get("status") == "assigned" and s.get("operator_id") == op_id]
+
+    if not mine:
+        await safe_reply(update, "Sizga biriktirilgan chat yo‘q.")
+        return
+
+    lines = ["<b>🟢 Sizga biriktirilgan chatlar:</b>"]
+    for s in mine[:20]:
+        topic_icon = "🔎" if s.get("topic") == "search_request" else "💬"
+        lines.append(f"• {topic_icon} {s.get('user_name', 'User')} — <code>{s['user_id']}</code>")
+
+    await safe_reply(update, "\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_or_operator(update):
+        return
+
+    op_id = update.effective_chat.id
+    user_id = context.user_data.get(ACTIVE_CHAT_USER_KEY)
+
+    if not user_id:
+        await safe_reply(update, "Avval biror chatni oling.")
+        return
+
+    sessions = get_sessions(context.application)
+    session = sessions.get(user_id)
+
+    if not session or session.get("status") != "assigned" or session.get("operator_id") != op_id:
+        context.user_data.pop(ACTIVE_CHAT_USER_KEY, None)
+        await safe_reply(update, "Bu chat sizga biriktirilmagan yoki yopilgan.")
+        return
+
+    session["status"] = "closed"
+    session["operator_id"] = None
+    context.user_data.pop(ACTIVE_CHAT_USER_KEY, None)
+
+    await safe_send_message(context.bot, user_id, "✅ Suhbat yakunlandi.\nYana savolingiz bo‘lsa, <b>💬 Chat</b> yoki <b>🔎 Bizda yo‘q mahsulotni topish</b> tugmasini bosing.", parse_mode=ParseMode.HTML)
+    await safe_reply(update, f"✅ Chat yakunlandi: <code>{user_id}</code>", parse_mode=ParseMode.HTML)
+
+
+# ================== CALLBACKS ==================
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not update.effective_chat:
+        return
+
+    operator_chat_id = update.effective_chat.id
+    real_operator_id = query.from_user.id if query.from_user else operator_chat_id
+
+    if not is_operator(real_operator_id):
+        await query.answer("Siz operator emassiz", show_alert=True)
+        return
+
+    data = query.data or ""
+    if ":" not in data:
+        await query.answer()
+        return
+
+    action, raw_user_id = data.split(":", 1)
+    try:
+        user_id = int(raw_user_id)
+    except ValueError:
+        await query.answer("Noto‘g‘ri user_id", show_alert=True)
+        return
+
+    sessions = get_sessions(context.application)
+    profiles = get_profiles(context.application)
+    session = sessions.get(user_id)
+
+    if not session:
+        await query.answer("Sessiya topilmadi", show_alert=True)
+        return
+
+    if action == "claim":
+        if session.get("status") == "closed":
+            await query.answer("Bu chat yopilgan", show_alert=True)
+            return
+
+        assigned_operator = session.get("operator_id")
+        if assigned_operator and assigned_operator != real_operator_id:
+            await query.answer("Bu chatni boshqa operator oldi", show_alert=True)
+            return
+
+        session["status"] = "assigned"
+        session["operator_id"] = real_operator_id
+
+        if context.application.user_data.get(real_operator_id) is None:
+            context.application.user_data[real_operator_id] = {}
+        context.application.user_data[real_operator_id][ACTIVE_CHAT_USER_KEY] = user_id
+
+        ready_text = "👨‍💼 Operator ulandi.\nSavolingizni yozishingiz mumkin."
+        if session.get("topic") == "search_request":
+            ready_text = "👨‍💼 Operator ulandi.\nMahsulot bo‘yicha narx va yetkazib berish muddatini yozib beradi."
+        await safe_send_message(context.bot, user_id, ready_text)
+
+        new_text = build_operator_ticket_text(session, profiles.get(user_id))
+        try:
+            await query.edit_message_text(text=new_text, parse_mode=ParseMode.HTML, reply_markup=session_keyboard(user_id))
+        except Exception:
+            pass
+
+        await query.answer("Chat sizga biriktirildi")
+        return
+
+    if action == "close":
+        if session.get("status") == "closed":
+            await query.answer("Allaqachon yopilgan")
+            return
+
+        assigned_operator = session.get("operator_id")
+        if assigned_operator and assigned_operator != real_operator_id:
+            await query.answer("Faqat biriktirilgan operator yopishi mumkin", show_alert=True)
+            return
+
+        session["status"] = "closed"
+        session["operator_id"] = None
+
+        if context.application.user_data.get(real_operator_id):
+            if context.application.user_data[real_operator_id].get(ACTIVE_CHAT_USER_KEY) == user_id:
+                context.application.user_data[real_operator_id].pop(ACTIVE_CHAT_USER_KEY, None)
+
+        await safe_send_message(context.bot, user_id, "✅ Suhbat yakunlandi.\nYana savolingiz bo‘lsa, <b>💬 Chat</b> yoki <b>🔎 Bizda yo‘q mahsulotni topish</b> tugmasini bosing.", parse_mode=ParseMode.HTML)
+
+        new_text = build_operator_ticket_text(session, profiles.get(user_id))
+        try:
+            await query.edit_message_text(text=new_text, parse_mode=ParseMode.HTML, reply_markup=session_keyboard(user_id))
+        except Exception:
+            pass
+
+        await query.answer("Suhbat yopildi")
+        return
+
     await query.answer()
 
-    data = query.data
-    admin_buttons = {"postnow", "drawnow", "today", "discounts", "status"}
-    user = update.effective_user
-    if data in admin_buttons and (not user or user.id not in ADMIN_USER_IDS):
-        await query.answer("Bu bo‘lim faqat admin uchun.", show_alert=True)
-        return
-    if data == "postnow":
-        await postnow(update, context)
-    elif data == "drawnow":
-        await drawnow(update, context)
-    elif data == "today":
-        await today(update, context)
-    elif data == "discounts":
-        await discounts(update, context)
-    elif data == "myref":
-        await myref(update, context)
-    elif data == "top20":
-        await top20(update, context)
-    elif data == "status":
-        await status(update, context)
-    elif data == "help":
-        await help_menu(update, context)
 
-def main() -> None:
+# ================== MEDIA HANDLER ==================
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_chat or not update.effective_user:
+        return
+
+    chat_id = update.effective_chat.id
+
+    if is_operator(chat_id):
+        active_user_id = context.user_data.get(ACTIVE_CHAT_USER_KEY)
+
+        if update.message.reply_to_message:
+            notif_map = get_notif_map(context.application)
+            key = f"{chat_id}:{update.message.reply_to_message.message_id}"
+            group_key = f"{OPERATOR_GROUP_ID}:{update.message.reply_to_message.message_id}" if OPERATOR_GROUP_ID else None
+            mapped_user = notif_map.get(key) or (notif_map.get(group_key) if group_key else None)
+            if mapped_user:
+                active_user_id = mapped_user
+                context.user_data[ACTIVE_CHAT_USER_KEY] = mapped_user
+
+        if not active_user_id:
+            await safe_reply(update, "Avval chatni oling yoki ticketga reply qiling.")
+            return
+
+        sessions = get_sessions(context.application)
+        session = sessions.get(active_user_id)
+        if not session or session.get("status") == "closed":
+            await safe_reply(update, "Bu chat yopilgan yoki topilmadi.")
+            return
+
+        if session.get("operator_id") not in (None, chat_id):
+            await safe_reply(update, "Bu chat boshqa operatorga biriktirilgan.")
+            return
+
+        if session.get("operator_id") is None:
+            session["operator_id"] = chat_id
+            session["status"] = "assigned"
+
+        caption = update.message.caption or "👨‍💼 Operatordan media"
+
+        try:
+            if update.message.photo:
+                await context.bot.send_photo(active_user_id, update.message.photo[-1].file_id, caption=caption)
+            elif update.message.video:
+                await context.bot.send_video(active_user_id, update.message.video.file_id, caption=caption)
+            elif update.message.audio:
+                await context.bot.send_audio(active_user_id, update.message.audio.file_id, caption=caption)
+            elif update.message.voice:
+                await context.bot.send_voice(active_user_id, update.message.voice.file_id, caption=caption)
+            elif update.message.document:
+                await context.bot.send_document(active_user_id, update.message.document.file_id, caption=caption)
+
+            await safe_reply(update, "✅ Foydalanuvchiga yuborildi.")
+        except Exception as e:
+            logger.exception("Operator media userga yuborilmadi: %s", e)
+            await safe_reply(update, "⚠️ Yuborilmadi.")
+        return
+
+    user = update.effective_user
+    user_id = user.id
+    profiles = get_profiles(context.application)
+    profile = profiles.get(user_id)
+    if not profile:
+        profile = {
+            "full_name": user_display_name(user),
+            "username": f"@{user.username}" if user.username else "yo‘q",
+        }
+        profiles[user_id] = profile
+
+    if not context.user_data.get(CHAT_MODE_KEY) and not context.user_data.get(SEARCH_MODE_KEY):
+        await safe_reply(update, "Avval <b>💬 Chat</b> yoki <b>🔎 Bizda yo‘q mahsulotni topish</b> tugmasini bosing.", parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+        return
+
+    sessions = get_sessions(context.application)
+    topic = "search_request" if context.user_data.get(SEARCH_MODE_KEY) else "chat"
+    session = ensure_user_session(sessions, user, profile, topic=topic)
+
+    media_note = "📎 Media yuborildi"
+    if update.message.photo:
+        media_note = "🖼 Rasm yuborildi"
+    elif update.message.video:
+        media_note = "🎥 Video yuborildi"
+    elif update.message.audio:
+        media_note = "🎵 Audio yuborildi"
+    elif update.message.voice:
+        media_note = "🎤 Voice yuborildi"
+    elif update.message.document:
+        media_note = "📄 Fayl yuborildi"
+
+    if update.message.caption:
+        media_note += f": {update.message.caption}"
+
+    session["messages"].append(media_note)
+
+    if session.get("topic") == "search_request":
+        caption_text = (
+            "<b>🔎 Bizda yo‘q mahsulot so‘rovi keldi</b>\n"
+            f"🆔 USER_ID: <code>{user_id}</code>\n"
+            f"👤 {profile.get('full_name', user_display_name(user))}\n"
+            "<b>Vazifa:</b> narx + yetkazib berish muddatini yozing."
+        )
+        user_ok_text = "✅ So‘rovingiz qabul qilindi.\nOperator mahsulotni ko‘rib, sizga umumiy summa va yetkazib berish vaqtini yozadi."
+    else:
+        caption_text = (
+            "<b>💬 Userdan media keldi</b>\n"
+            f"🆔 USER_ID: <code>{user_id}</code>\n"
+            f"👤 {profile.get('full_name', user_display_name(user))}\n"
+        )
+        user_ok_text = "✅ Media operatorga yuborildi.\nJavob kelishini kuting."
+
+    await notify_operators_media(
+        context=context,
+        user_id=user_id,
+        caption_text=caption_text,
+        profile=profile,
+        photo=update.message.photo[-1].file_id if update.message.photo else None,
+        video=update.message.video.file_id if update.message.video else None,
+        audio=update.message.audio.file_id if update.message.audio else None,
+        voice=update.message.voice.file_id if update.message.voice else None,
+        document=update.message.document.file_id if update.message.document else None,
+    )
+
+    await safe_reply(update, user_ok_text, reply_markup=main_keyboard())
+
+
+# ================== TEXT HANDLER ==================
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.effective_chat:
+        return
+
+    text = (update.message.text or "").strip()
+    chat_id = update.effective_chat.id
+
+    if is_operator(chat_id):
+        active_user_id = context.user_data.get(ACTIVE_CHAT_USER_KEY)
+
+        if update.message.reply_to_message:
+            notif_map = get_notif_map(context.application)
+            key = f"{chat_id}:{update.message.reply_to_message.message_id}"
+            group_key = f"{OPERATOR_GROUP_ID}:{update.message.reply_to_message.message_id}" if OPERATOR_GROUP_ID else None
+            mapped_user = notif_map.get(key) or (notif_map.get(group_key) if group_key else None)
+            if mapped_user:
+                active_user_id = mapped_user
+                context.user_data[ACTIVE_CHAT_USER_KEY] = mapped_user
+
+        if text in ("📞 Bog'lanish", "ℹ️ Ma'lumot", "💬 Chat", "🛍 OrzuMall.uz", "🔎 Bizda yo‘q mahsulotni topish"):
+            await safe_reply(update, "Operator panelida bu tugmalar ishlatilmaydi.")
+            return
+
+        if active_user_id:
+            sessions = get_sessions(context.application)
+            session = sessions.get(active_user_id)
+
+            if not session:
+                context.user_data.pop(ACTIVE_CHAT_USER_KEY, None)
+                await safe_reply(update, "Chat topilmadi.")
+                return
+
+            if session.get("status") == "closed":
+                context.user_data.pop(ACTIVE_CHAT_USER_KEY, None)
+                await safe_reply(update, "Bu chat yopilgan.")
+                return
+
+            if session.get("operator_id") not in (None, chat_id):
+                await safe_reply(update, "Bu chat boshqa operatorga biriktirilgan.")
+                return
+
+            if session.get("operator_id") is None:
+                session["operator_id"] = chat_id
+                session["status"] = "assigned"
+
+            prefix = "👨‍💼 Operator"
+            if session.get("topic") == "search_request":
+                prefix = "👨‍💼 Mahsulot bo‘yicha javob"
+            sent = await safe_send_message(context.bot, active_user_id, f"{prefix}:\n{text}")
+            if sent:
+                await safe_reply(update, "✅ Foydalanuvchiga yuborildi.")
+            else:
+                await safe_reply(update, "⚠️ Yuborilmadi.")
+            return
+
+        await safe_reply(update, "Sizda aktiv chat yo‘q.\nTugma orqali chatni oling yoki /queue va /my ni tekshiring.")
+        return
+
+    if text == "📞 Bog'lanish":
+        context.user_data[CHAT_MODE_KEY] = False
+        context.user_data[SEARCH_MODE_KEY] = False
+        await safe_reply(update, CONTACT_TEXT, parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+        return
+
+    if text == "ℹ️ Ma'lumot":
+        context.user_data[CHAT_MODE_KEY] = False
+        context.user_data[SEARCH_MODE_KEY] = False
+        await safe_reply(update, ABOUT_TEXT, parse_mode=ParseMode.HTML, reply_markup=main_keyboard())
+        return
+
+    if text == "💬 Chat":
+        await chat_on(update, context)
+        return
+
+    if text == "🔎 Bizda yo‘q mahsulotni topish":
+        await search_product_on(update, context)
+        return
+
+    user = update.effective_user
+    user_id = user.id if user else chat_id
+    profiles = get_profiles(context.application)
+    profile = profiles.get(user_id)
+    if not profile:
+        profile = {
+            "full_name": user_display_name(user),
+            "username": f"@{user.username}" if user and user.username else "yo‘q",
+        }
+        profiles[user_id] = profile
+
+    if context.user_data.get(SEARCH_MODE_KEY) is True and text not in ("🛍 OrzuMall.uz", "📞 Bog'lanish", "ℹ️ Ma'lumot", "💬 Chat", "🔎 Bizda yo‘q mahsulotni topish"):
+        sessions = get_sessions(context.application)
+        session = ensure_user_session(sessions, user, profile, topic="search_request")
+        session["messages"].append(f"🔎 Mahsulot so‘rovi: {text}")
+
+        ticket_text = build_operator_ticket_text(session, profile)
+        await notify_operators(context, ticket_text, reply_markup=session_keyboard(user_id), user_id=user_id)
+
+        await safe_reply(update, "✅ So‘rovingiz operatorga yuborildi.\nTez orada sizga taxminiy umumiy summa va yetkazib berish muddati yoziladi.", reply_markup=main_keyboard())
+        return
+
+    if context.user_data.get(CHAT_MODE_KEY) is True and text not in ("🛍 OrzuMall.uz", "📞 Bog'lanish", "ℹ️ Ma'lumot", "💬 Chat", "🔎 Bizda yo‘q mahsulotni topish"):
+        sessions = get_sessions(context.application)
+        session = ensure_user_session(sessions, user, profile, topic="chat")
+
+        if session.get("status") == "closed":
+            session["status"] = "waiting"
+            session["operator_id"] = None
+            session["messages"] = []
+            session["topic"] = "chat"
+
+        session["messages"].append(text)
+
+        ticket_text = build_operator_ticket_text(session, profile)
+        await notify_operators(context, ticket_text, reply_markup=session_keyboard(user_id), user_id=user_id)
+
+        await safe_reply(update, "✅ Xabaringiz operatorga yuborildi.\nJavob kelishini kuting.", reply_markup=main_keyboard())
+        return
+
+    await safe_reply(update, "Tugmalardan foydalaning 👇", reply_markup=main_keyboard())
+
+
+# ================== ERROR HANDLER ==================
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Global error handler: %s", context.error)
+
+
+# ================== MAIN ==================
+def main():
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN topilmadi. Railway Variables ga qo‘ying.")
+        print("\n❌ BOT_TOKEN topilmadi.")
+        print("PowerShell:  $env:BOT_TOKEN=\"YOUR_TOKEN\"  ;  python bot.py\n")
+        raise SystemExit(1)
+
+    logger.info("Operators: %s", OPERATORS)
+    logger.info("Operator group: %s", OPERATOR_GROUP_ID)
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_menu))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("testforward", testforward))
-    app.add_handler(CommandHandler("postnow", postnow))
-    app.add_handler(CommandHandler("drawnow", drawnow))
-    app.add_handler(CommandHandler("today", today))
-    app.add_handler(CommandHandler("discounts", discounts))
-    app.add_handler(CommandHandler("myref", myref))
-    app.add_handler(CommandHandler("top20", top20))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("menu", menu))
+    app.add_handler(CommandHandler("chat_on", chat_on))
+    app.add_handler(CommandHandler("chat_off", chat_off))
+    app.add_handler(CommandHandler("queue", queue_command))
+    app.add_handler(CommandHandler("my", my_command))
+    app.add_handler(CommandHandler("done", done_command))
 
-    app.add_handler(MessageHandler(filters.FORWARDED, debug_ids))
-    app.add_handler(MessageReactionHandler(reaction_handler))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_members_handler))
-    app.add_handler(ChatMemberHandler(chat_member_handler, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(ChatJoinRequestHandler(lambda u, c: None))
+    app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Document.ALL, handle_media))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    jq = app.job_queue
-    if jq is None:
-        logger.warning("JobQueue yo‘q. requirements.txt ichida python-telegram-bot[job-queue] bo‘lishi kerak.")
-    else:
-        jq.run_daily(
-            do_forward,
-            time=time(hour=POST_HOUR, minute=POST_MINUTE, tzinfo=ZoneInfo(TZ)),
-            name="daily_forward_post",
-        )
-        jq.run_daily(
-            contest_post,
-            time=time(hour=MORNING_HOUR, minute=MORNING_MINUTE, tzinfo=ZoneInfo(TZ)),
-            name="daily_contest_post",
-        )
-        jq.run_daily(
-            draw_winner,
-            time=time(hour=WINNER_HOUR, minute=WINNER_MINUTE, tzinfo=ZoneInfo(TZ)),
-            name="daily_contest_winner",
-        )
-        jq.run_daily(
-            post_top20,
-            time=time(hour=TOP_HOUR, minute=TOP_MINUTE, tzinfo=ZoneInfo(TZ)),
-            name="daily_top20_post",
-        )
+    app.add_error_handler(on_error)
 
-    logger.info("Bot ishga tushdi.")
-    app.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
+    logger.info("✅ OrzuMall bot ishga tushdi. CTRL+C bilan to'xtatasiz.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
