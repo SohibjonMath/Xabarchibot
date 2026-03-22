@@ -1,10 +1,10 @@
-
 import json
 import logging
 import os
 import random
 from datetime import datetime, time, timedelta
 from pathlib import Path
+from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -32,13 +32,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 TZ = os.getenv("TZ", "Asia/Tashkent").strip()
 ZONE = ZoneInfo(TZ)
 
-# Forward settings
-TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "").strip()
-SOURCE_CHAT_ID = os.getenv("SOURCE_CHAT_ID", "").strip()
-SOURCE_MESSAGE_ID = int(os.getenv("SOURCE_MESSAGE_ID", "0"))
-POST_HOUR = int(os.getenv("POST_HOUR", "7"))
-POST_MINUTE = int(os.getenv("POST_MINUTE", "30"))
-
 # Contest settings
 CONTEST_CHAT_ID = os.getenv("CONTEST_CHAT_ID", "").strip()
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
@@ -60,9 +53,20 @@ DISCOUNT_MAX_SUM = int(os.getenv("DISCOUNT_MAX_SUM", "1000000"))
 DISCOUNT_HOURS = int(os.getenv("DISCOUNT_HOURS", "72"))
 WINNER_COOLDOWN_DAYS = int(os.getenv("WINNER_COOLDOWN_DAYS", "30"))
 
+# Storage settings
 STATE_DIR = Path(os.getenv("STATE_DIR", "./data"))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = STATE_DIR / "bot_state.json"
+
+# Ranking window
+RANKING_CUTOFF_HOUR = int(os.getenv("RANKING_CUTOFF_HOUR", "21"))
+RANKING_CUTOFF_MINUTE = int(os.getenv("RANKING_CUTOFF_MINUTE", "0"))
+
+# Retention
+INVITE_RETENTION_DAYS = int(os.getenv("INVITE_RETENTION_DAYS", "90"))
+
+# Telegram message safe split
+MAX_MESSAGE_LEN = 3800
 
 
 def tz_now() -> datetime:
@@ -108,6 +112,7 @@ def remember_user(user) -> None:
     STATE.setdefault("participants_meta", {})[str(user.id)] = {
         "username": getattr(user, "username", None),
         "first_name": getattr(user, "first_name", None),
+        "last_name": getattr(user, "last_name", None),
     }
     save_state()
 
@@ -116,10 +121,12 @@ def display_name_for(uid: int, fallback: str | None = None) -> str:
     meta = STATE.get("participants_meta", {}).get(str(uid), {})
     username = meta.get("username")
     first_name = meta.get("first_name")
+    last_name = meta.get("last_name")
     if username:
         return f"@{username}"
-    if first_name:
-        return first_name
+    full_name = " ".join(x for x in [first_name, last_name] if x)
+    if full_name.strip():
+        return full_name.strip()
     if fallback:
         return fallback
     return str(uid)
@@ -134,9 +141,12 @@ def label_with_you(label: str, target_uid: int | str, viewer_uid: int | None) ->
     return label
 
 
+def html_escape(s: str) -> str:
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def mention_html(user_id: int, label: str) -> str:
-    safe = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    return f'<a href="tg://user?id={user_id}">{safe}</a>'
+    return f'<a href="tg://user?id={user_id}">{html_escape(label)}</a>'
 
 
 def cleanup_expired_discounts() -> None:
@@ -165,7 +175,7 @@ def cleanup_old_invites() -> None:
     for item in STATE.get("invite_joins", []):
         try:
             ts = datetime.fromisoformat(item["ts"])
-            if ts > now - timedelta(days=14):
+            if ts > now - timedelta(days=INVITE_RETENTION_DAYS):
                 keep.append(item)
         except Exception:
             continue
@@ -185,38 +195,190 @@ def already_recent_winner(user_id: int) -> bool:
         return False
 
 
-def register_invite_join(inviter_id: int, inviter_label: str, joined_id: int, joined_label: str, source: str) -> None:
+def register_invite_join(
+    inviter_id: int,
+    inviter_label: str,
+    joined_id: int,
+    joined_label: str,
+    source: str,
+) -> None:
     if inviter_id == joined_id:
         return
 
     remember_stub = STATE.setdefault("participants_meta", {})
-    if str(inviter_id) not in remember_stub and inviter_label and inviter_label.startswith("@"):
-        remember_stub[str(inviter_id)] = {"username": inviter_label[1:], "first_name": None}
-    if str(joined_id) not in remember_stub and joined_label and joined_label.startswith("@"):
-        remember_stub[str(joined_id)] = {"username": joined_label[1:], "first_name": None}
+    if str(inviter_id) not in remember_stub:
+        remember_stub[str(inviter_id)] = {"username": None, "first_name": inviter_label, "last_name": None}
+    if str(joined_id) not in remember_stub:
+        remember_stub[str(joined_id)] = {"username": None, "first_name": joined_label, "last_name": None}
 
+    # Same inviter + same joined user -> 1 marta hisoblanadi
     key = (str(inviter_id), str(joined_id))
-    now = tz_now()
     for item in reversed(STATE.get("invite_joins", [])):
         if (str(item.get("inviter_id")), str(item.get("joined_id"))) == key:
-            try:
-                ts = datetime.fromisoformat(item["ts"])
-                if ts > now - timedelta(days=1):
-                    return
-            except Exception:
-                pass
+            return
 
     STATE.setdefault("invite_joins", []).append(
         {
-            "ts": now.isoformat(),
+            "ts": tz_now().isoformat(),
             "inviter_id": inviter_id,
             "joined_id": joined_id,
             "inviter_label": inviter_label,
             "joined_label": joined_label,
-            "source": source,
+            "source": source,  # direct_add / personal_link
         }
     )
     save_state()
+
+
+def ranking_anchor_for(dt: datetime) -> datetime:
+    anchor = dt.replace(
+        hour=RANKING_CUTOFF_HOUR,
+        minute=RANKING_CUTOFF_MINUTE,
+        second=0,
+        microsecond=0,
+    )
+    if dt < anchor:
+        anchor -= timedelta(days=1)
+    return anchor
+
+
+def active_window_bounds(now: datetime | None = None) -> tuple[datetime, datetime]:
+    now = now or tz_now()
+    start = ranking_anchor_for(now)
+    end = start + timedelta(days=1)
+    return start, end
+
+
+def closed_window_bounds(days_ago: int = 0, now: datetime | None = None) -> tuple[datetime, datetime]:
+    """
+    days_ago=0 => eng oxirgi yopilgan window
+    days_ago=1 => undan oldingi yopilgan window
+    """
+    now = now or tz_now()
+    active_start, _ = active_window_bounds(now)
+    end = active_start - timedelta(days=days_ago)
+    start = end - timedelta(days=1)
+    return start, end
+
+
+def parse_ts(raw: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def score_events_between(start: datetime, end: datetime) -> list[tuple[str, int, str]]:
+    cleanup_old_invites()
+
+    seen_joined_ids = set()
+    scored: dict[str, int] = {}
+    labels: dict[str, str] = {}
+
+    # Bitta user bir window ichida qayta chiqib-kirib qolsa, 1 marta sanaladi
+    # Prioritet:
+    # - joined_id bo'yicha unique
+    # - birinchi topilgan inviterga yoziladi
+    items = sorted(
+        STATE.get("invite_joins", []),
+        key=lambda x: x.get("ts", ""),
+    )
+
+    for item in items:
+        ts = parse_ts(item.get("ts", ""))
+        if not ts or ts < start or ts >= end:
+            continue
+
+        joined_id = str(item.get("joined_id"))
+        inviter_id = str(item.get("inviter_id"))
+        inviter_label = str(item.get("inviter_label") or inviter_id)
+
+        if joined_id in seen_joined_ids:
+            continue
+        seen_joined_ids.add(joined_id)
+
+        scored[inviter_id] = scored.get(inviter_id, 0) + 1
+
+        if inviter_label and not inviter_label.isdigit():
+            labels[inviter_id] = inviter_label
+        else:
+            try:
+                labels[inviter_id] = display_name_for(int(inviter_id), inviter_label)
+            except Exception:
+                labels[inviter_id] = inviter_label
+
+    ranking = sorted(
+        [(uid, count, labels.get(uid, uid)) for uid, count in scored.items()],
+        key=lambda x: (-x[1], x[0]),
+    )
+    return ranking
+
+
+def ranking_title(start: datetime, end: datetime) -> str:
+    return (
+        f"📊 <b>REYTING</b>\n"
+        f"<b>{start.strftime('%d.%m %H:%M')}</b> → <b>{end.strftime('%d.%m %H:%M')}</b>\n"
+    )
+
+
+def ranking_lines(
+    ranking: list[tuple[str, int, str]],
+    viewer_uid: int | None = None,
+    start_index: int = 1,
+) -> list[str]:
+    if not ranking:
+        return ["Hozircha natija yo'q."]
+
+    lines = []
+    badges = ["🥇", "🥈", "🥉"]
+    for idx, (uid, count, raw_label) in enumerate(ranking, start=start_index):
+        prefix = badges[idx - 1] if idx <= 3 else f"{idx}."
+        shown_label = label_with_you(str(raw_label), uid, viewer_uid)
+
+        if str(raw_label).startswith("@"):
+            label_html = html_escape(shown_label)
+        else:
+            try:
+                label_html = mention_html(int(uid), shown_label)
+            except Exception:
+                label_html = html_escape(shown_label)
+
+        lines.append(f"{prefix} {label_html} — <b>{count} ta</b> odam")
+    return lines
+
+
+def chunk_lines_with_header(header: str, lines: list[str], footer: str | None = None) -> list[str]:
+    parts = []
+    current = header.strip() + "\n\n"
+
+    for line in lines:
+        candidate = current + line + "\n"
+        if len(candidate) > MAX_MESSAGE_LEN:
+            if footer:
+                current += "\n" + footer
+            parts.append(current.strip())
+            current = header.strip() + "\n\n" + line + "\n"
+        else:
+            current = candidate
+
+    if footer:
+        current += "\n" + footer
+    parts.append(current.strip())
+    return parts
+
+
+async def send_long_html(
+    target,
+    header: str,
+    lines: list[str],
+    footer: str | None = None,
+) -> None:
+    messages = chunk_lines_with_header(header, lines, footer)
+    for msg in messages:
+        if hasattr(target, "reply_text"):
+            await target.reply_text(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        else:
+            await target.send_message(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 def contest_post_text() -> str:
@@ -249,64 +411,6 @@ def winner_post_text(winner_id: int) -> str:
     )
 
 
-def top20_text(window_hours: int = 24, viewer_uid: int | None = None) -> str:
-    now = tz_now()
-    seen_pairs = set()
-    scored: dict[str, int] = {}
-    labels: dict[str, str] = {}
-
-    for item in STATE.get("invite_joins", []):
-        try:
-            ts = datetime.fromisoformat(item["ts"])
-        except Exception:
-            continue
-        if ts <= now - timedelta(hours=window_hours):
-            continue
-
-        key = (str(item["inviter_id"]), str(item["joined_id"]))
-        if key in seen_pairs:
-            continue
-        seen_pairs.add(key)
-
-        inviter_id = str(item["inviter_id"])
-        scored[inviter_id] = scored.get(inviter_id, 0) + 1
-
-        inviter_label = item.get("inviter_label")
-        if inviter_label and not str(inviter_label).isdigit():
-            labels[inviter_id] = str(inviter_label)
-        else:
-            try:
-                labels[inviter_id] = display_name_for(int(inviter_id), inviter_label)
-            except Exception:
-                labels[inviter_id] = str(inviter_label or inviter_id)
-
-    ranking = sorted(scored.items(), key=lambda x: (-x[1], x[0]))[:20]
-
-    if not ranking:
-        return (
-            "📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n\n"
-            "Hozircha natija yo‘q.\n\n"
-            "💡 Eng yaxshi usul: <b>/myref</b> orqali shaxsiy referral havolangizni oling."
-        )
-
-    lines = ["📊 <b>OXIRGI 24 SOAT BO‘YICHA TOP 20</b>\n"]
-    badges = ["🥇", "🥈", "🥉"]
-
-    for i, (uid, count) in enumerate(ranking, start=1):
-        prefix = badges[i - 1] if i <= 3 else f"{i}."
-        raw_label = labels.get(uid, uid)
-        shown_label = label_with_you(str(raw_label), uid, viewer_uid)
-        if str(raw_label).startswith("@"):
-            safe = shown_label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            label_html = safe
-        else:
-            label_html = mention_html(int(uid), shown_label)
-        lines.append(f"{prefix} {label_html} — <b>{count} ta</b> odam")
-
-    lines.append("\n🎁 Sovrinlarni admin belgilaydi.\n🔗 Referral havolangiz uchun: /myref")
-    return "\n".join(lines)
-
-
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -315,17 +419,18 @@ def admin_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🏆 G'olib tanlash", callback_data="drawnow"),
             ],
             [
-                InlineKeyboardButton("📊 Bugungi holat", callback_data="today"),
+                InlineKeyboardButton("📊 Joriy reyting", callback_data="top_active"),
+                InlineKeyboardButton("📆 3 kunlik", callback_data="top3days"),
+            ],
+            [
+                InlineKeyboardButton("📌 Bugungi holat", callback_data="today"),
                 InlineKeyboardButton("💰 Faol skidkalar", callback_data="discounts"),
             ],
             [
                 InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
-                InlineKeyboardButton("🥇 TOP 20", callback_data="top20"),
-            ],
-            [
                 InlineKeyboardButton("⚙️ Status", callback_data="status"),
-                InlineKeyboardButton("ℹ️ Yordam", callback_data="help"),
             ],
+            [InlineKeyboardButton("ℹ️ Yordam", callback_data="help")],
         ]
     )
 
@@ -335,8 +440,9 @@ def user_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("🔗 Mening referralim", callback_data="myref"),
-                InlineKeyboardButton("🥇 TOP 20", callback_data="top20"),
+                InlineKeyboardButton("📊 Joriy reyting", callback_data="top_active"),
             ],
+            [InlineKeyboardButton("📆 3 kunlik", callback_data="top3days")],
             [InlineKeyboardButton("ℹ️ Yordam", callback_data="help")],
         ]
     )
@@ -350,11 +456,13 @@ HELP_TEXT = (
     "🤖 <b>OrzuMall Xabarchi</b>\n\n"
     "Kerakli bo'limni pastdagi tugmalardan tanlang.\n\n"
     "<b>Asosiy funksiyalar:</b>\n"
-    "• Kanalga avtomatik forward post\n"
     "• 06:00 da contest post\n"
     "• 20:00 da random g'olib\n"
     "• 25% skidka nazorati\n"
-    "• Referral orqali TOP 20"
+    "• Referral + kontaktdan qo'shish hisoblash\n"
+    f"• Reyting oynasi: <b>{RANKING_CUTOFF_HOUR:02d}:{RANKING_CUTOFF_MINUTE:02d}</b> → ertasi kuni shu vaqtgacha\n"
+    "• Cheksiz reyting (1000+ user bo'lsa ham)\n"
+    "• Oxirgi 3 kun natijalari"
 )
 
 
@@ -408,42 +516,22 @@ async def help_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_expired_discounts()
     cleanup_old_invites()
+    active_start, active_end = active_window_bounds()
     text = (
         "<b>⚙️ Joriy sozlamalar</b>\n\n"
-        f"• TARGET_CHANNEL: <code>{TARGET_CHANNEL or 'kiritilmagan'}</code>\n"
-        f"• SOURCE_CHAT_ID: <code>{SOURCE_CHAT_ID or 'kiritilmagan'}</code>\n"
-        f"• SOURCE_MESSAGE_ID: <code>{SOURCE_MESSAGE_ID or 'kiritilmagan'}</code>\n"
-        f"• Forward vaqti: <b>{POST_HOUR:02d}:{POST_MINUTE:02d}</b>\n"
         f"• CONTEST_CHAT_ID: <code>{CONTEST_CHAT_ID or 'kiritilmagan'}</code>\n"
         f"• Contest posti: <b>{MORNING_HOUR:02d}:{MORNING_MINUTE:02d}</b>\n"
         f"• Winner vaqti: <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b>\n"
         f"• INVITE_CHAT_ID: <code>{INVITE_CHAT_ID or 'kiritilmagan'}</code>\n"
-        f"• TOP 20 e'lon: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
+        f"• Daily reyting post: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
+        f"• Reyting oynasi: <b>{RANKING_CUTOFF_HOUR:02d}:{RANKING_CUTOFF_MINUTE:02d}</b> → ertasi kuni\n"
+        f"• Joriy window: <b>{active_start.strftime('%d.%m %H:%M')}</b> → <b>{active_end.strftime('%d.%m %H:%M')}</b>\n"
         f"• Faol skidkalar: <b>{len(STATE.get('discounts', {}))}</b>\n"
         f"• Invite eventlar: <b>{len(STATE.get('invite_joins', []))}</b>\n"
+        f"• Retention: <b>{INVITE_RETENTION_DAYS} kun</b>\n"
         f"• TZ: <b>{TZ}</b>"
     )
     await reply_text(update, text, parse_mode=ParseMode.HTML)
-
-
-async def do_forward(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not TARGET_CHANNEL or not SOURCE_CHAT_ID or not SOURCE_MESSAGE_ID:
-        logger.warning("Forward sozlamalari to'liq emas.")
-        return
-    try:
-        await context.bot.forward_message(
-            chat_id=TARGET_CHANNEL,
-            from_chat_id=SOURCE_CHAT_ID,
-            message_id=SOURCE_MESSAGE_ID,
-        )
-        logger.info("Forward yuborildi.")
-    except Exception:
-        logger.exception("Forward yuborilmadi")
-
-
-async def testforward(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await do_forward(context)
-    await reply_text(update, "✅ Forward yuborishga urunildi.")
 
 
 async def contest_post(context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -497,7 +585,10 @@ async def draw_winner(context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
 
     if not participant_ids:
         try:
-            await context.bot.send_message(chat_id=CONTEST_CHAT_ID, text="Bugun hali hech kim reaksiya qoldirmadi.")
+            await context.bot.send_message(
+                chat_id=CONTEST_CHAT_ID,
+                text="Bugun hali hech kim reaksiya qoldirmadi.",
+            )
         except Exception:
             logger.exception("Contest chatga xabar yuborilmadi")
         return False, "Ishtirokchilar yo'q."
@@ -549,7 +640,7 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if old and old.get("invite_link"):
         await reply_text(
             update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{old['invite_link']}</code>\n\n"
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(old['invite_link'])}</code>\n\n"
             "Shu havola orqali kirganlar sizga yoziladi.",
             parse_mode=ParseMode.HTML,
         )
@@ -569,7 +660,7 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         save_state()
         await reply_text(
             update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{link.invite_link}</code>\n\n"
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(link.invite_link)}</code>\n\n"
             "Shu havola orqali kirganlar sizga yoziladi.",
             parse_mode=ParseMode.HTML,
         )
@@ -591,6 +682,8 @@ async def new_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if member.is_bot:
             continue
         remember_user(member)
+
+        # Kontaktdan / qo'lda qo'shish holati
         if inviter and not inviter.is_bot and inviter.id != member.id:
             register_invite_join(
                 inviter_id=inviter.id,
@@ -617,6 +710,7 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     remember_user(joined_user)
 
+    # Personal referral link orqali qo'shilganlarni ushlaydi
     inv_link = getattr(cmu, "invite_link", None)
     if inv_link and getattr(inv_link, "name", None):
         name = inv_link.name or ""
@@ -634,34 +728,76 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.exception("Invite link parse bo'lmadi")
 
 
-async def post_top20(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def send_ranking_for_window(
+    target,
+    start: datetime,
+    end: datetime,
+    viewer_uid: int | None = None,
+    footer: str | None = None,
+) -> None:
+    ranking = score_events_between(start, end)
+    header = ranking_title(start, end)
+    lines = ranking_lines(ranking, viewer_uid=viewer_uid)
+    await send_long_html(target, header, lines, footer=footer)
+
+
+async def top_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    viewer_uid = update.effective_user.id if update.effective_user else None
+    start, end = active_window_bounds()
+    footer = "🔗 Referral havolangiz: /myref"
+    target = update.callback_query.message if update.callback_query else update.message
+    await send_ranking_for_window(target, start, end, viewer_uid=viewer_uid, footer=footer)
+
+
+async def top_prev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    viewer_uid = update.effective_user.id if update.effective_user else None
+    start, end = closed_window_bounds(0)
+    target = update.callback_query.message if update.callback_query else update.message
+    await send_ranking_for_window(target, start, end, viewer_uid=viewer_uid)
+
+
+async def top3days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    viewer_uid = update.effective_user.id if update.effective_user else None
+    target = update.callback_query.message if update.callback_query else update.message
+
+    for days_ago in range(0, 3):
+        start, end = closed_window_bounds(days_ago)
+        await send_ranking_for_window(target, start, end, viewer_uid=viewer_uid)
+
+
+async def post_top_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not INVITE_CHAT_ID:
         logger.warning("INVITE_CHAT_ID yo'q.")
         return
-    cleanup_old_invites()
     try:
-        await context.bot.send_message(
-            chat_id=INVITE_CHAT_ID,
-            text=top20_text(24),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
+        start, end = closed_window_bounds(0)
+        await send_ranking_for_window(
+            context.bot,
+            start,
+            end,
+            footer="🔗 Referral havolangiz uchun: /myref",
         )
     except Exception:
-        logger.exception("Top20 post yuborilmadi")
-
-
-async def top20(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cleanup_old_invites()
-    viewer_uid = update.effective_user.id if update.effective_user else None
-    await reply_text(update, top20_text(24, viewer_uid), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        logger.exception("Daily reyting post yuborilmadi")
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    active_start, active_end = active_window_bounds()
+    prev_start, prev_end = closed_window_bounds(0)
+    current_ranking = score_events_between(active_start, active_end)
+    prev_ranking = score_events_between(prev_start, prev_end)
+
     text = (
-        "📌 <b>Bugungi contest holati</b>\n\n"
-        f"• Sana: <b>{STATE.get('current_post_date') or 'yo‘q'}</b>\n"
-        f"• Post ID: <code>{STATE.get('current_post_id') or 'yo‘q'}</code>\n"
-        f"• Ishtirokchilar soni: <b>{len(STATE.get('participants', []))}</b>"
+        "📌 <b>Bugungi holat</b>\n\n"
+        f"• Contest sana: <b>{STATE.get('current_post_date') or 'yo‘q'}</b>\n"
+        f"• Contest post ID: <code>{STATE.get('current_post_id') or 'yo‘q'}</code>\n"
+        f"• Contest ishtirokchilari: <b>{len(STATE.get('participants', []))}</b>\n\n"
+        f"• Joriy reyting oynasi:\n"
+        f"  <b>{active_start.strftime('%d.%m %H:%M')}</b> → <b>{active_end.strftime('%d.%m %H:%M')}</b>\n"
+        f"• Joriy reytingdagi odamlar soni: <b>{len(current_ranking)}</b>\n\n"
+        f"• Oxirgi yopilgan reyting oynasi:\n"
+        f"  <b>{prev_start.strftime('%d.%m %H:%M')}</b> → <b>{prev_end.strftime('%d.%m %H:%M')}</b>\n"
+        f"• O'sha oynadagi odamlar soni: <b>{len(prev_ranking)}</b>"
     )
     await reply_text(update, text, parse_mode=ParseMode.HTML)
 
@@ -734,8 +870,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await discounts(update, context)
     elif data == "myref":
         await myref(update, context)
-    elif data == "top20":
-        await top20(update, context)
+    elif data == "top_active":
+        await top_active(update, context)
+    elif data == "top3days":
+        await top3days(update, context)
 
 
 def main() -> None:
@@ -747,13 +885,14 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_menu))
     app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("testforward", testforward))
     app.add_handler(CommandHandler("postnow", postnow))
     app.add_handler(CommandHandler("drawnow", drawnow))
     app.add_handler(CommandHandler("today", today))
     app.add_handler(CommandHandler("discounts", discounts))
     app.add_handler(CommandHandler("myref", myref))
-    app.add_handler(CommandHandler("top20", top20))
+    app.add_handler(CommandHandler("top", top_active))
+    app.add_handler(CommandHandler("topprev", top_prev))
+    app.add_handler(CommandHandler("top3days", top3days))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     app.add_handler(MessageReactionHandler(reaction_handler))
@@ -762,10 +901,21 @@ def main() -> None:
 
     jq = app.job_queue
     if jq is not None:
-        jq.run_daily(do_forward, time=time(hour=POST_HOUR, minute=POST_MINUTE, tzinfo=ZONE), name="daily_forward")
-        jq.run_daily(contest_post, time=time(hour=MORNING_HOUR, minute=MORNING_MINUTE, tzinfo=ZONE), name="daily_contest")
-        jq.run_daily(draw_winner, time=time(hour=WINNER_HOUR, minute=WINNER_MINUTE, tzinfo=ZONE), name="daily_winner")
-        jq.run_daily(post_top20, time=time(hour=TOP_HOUR, minute=TOP_MINUTE, tzinfo=ZONE), name="daily_top20")
+        jq.run_daily(
+            contest_post,
+            time=time(hour=MORNING_HOUR, minute=MORNING_MINUTE, tzinfo=ZONE),
+            name="daily_contest",
+        )
+        jq.run_daily(
+            draw_winner,
+            time=time(hour=WINNER_HOUR, minute=WINNER_MINUTE, tzinfo=ZONE),
+            name="daily_winner",
+        )
+        jq.run_daily(
+            post_top_daily,
+            time=time(hour=TOP_HOUR, minute=TOP_MINUTE, tzinfo=ZONE),
+            name="daily_top_ranking",
+        )
 
     app.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
 
