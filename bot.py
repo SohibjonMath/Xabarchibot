@@ -4,7 +4,6 @@ import os
 import random
 from datetime import datetime, time, timedelta
 from pathlib import Path
-from typing import Iterable
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -28,44 +27,39 @@ logger = logging.getLogger("OrzuMallXabarchi")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# General
 TZ = os.getenv("TZ", "Asia/Tashkent").strip()
 ZONE = ZoneInfo(TZ)
 
-# Contest settings
 CONTEST_CHAT_ID = os.getenv("CONTEST_CHAT_ID", "").strip()
+INVITE_CHAT_ID = os.getenv("INVITE_CHAT_ID", CONTEST_CHAT_ID).strip()
+
 MORNING_HOUR = int(os.getenv("MORNING_HOUR", "6"))
 MORNING_MINUTE = int(os.getenv("MORNING_MINUTE", "0"))
+
 WINNER_HOUR = int(os.getenv("WINNER_HOUR", "20"))
 WINNER_MINUTE = int(os.getenv("WINNER_MINUTE", "0"))
 
-# Referral / leaderboard settings
-INVITE_CHAT_ID = os.getenv("INVITE_CHAT_ID", CONTEST_CHAT_ID).strip()
 TOP_HOUR = int(os.getenv("TOP_HOUR", "21"))
 TOP_MINUTE = int(os.getenv("TOP_MINUTE", "0"))
 
-# Admin / discount settings
+RANKING_CUTOFF_HOUR = int(os.getenv("RANKING_CUTOFF_HOUR", "21"))
+RANKING_CUTOFF_MINUTE = int(os.getenv("RANKING_CUTOFF_MINUTE", "0"))
+
 ADMIN_USER_IDS = [
     int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()
 ]
+
 DISCOUNT_PERCENT = int(os.getenv("DISCOUNT_PERCENT", "25"))
 DISCOUNT_MAX_SUM = int(os.getenv("DISCOUNT_MAX_SUM", "1000000"))
 DISCOUNT_HOURS = int(os.getenv("DISCOUNT_HOURS", "72"))
 WINNER_COOLDOWN_DAYS = int(os.getenv("WINNER_COOLDOWN_DAYS", "30"))
 
-# Storage settings
+INVITE_RETENTION_DAYS = int(os.getenv("INVITE_RETENTION_DAYS", "90"))
+
 STATE_DIR = Path(os.getenv("STATE_DIR", "./data"))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = STATE_DIR / "bot_state.json"
 
-# Ranking window
-RANKING_CUTOFF_HOUR = int(os.getenv("RANKING_CUTOFF_HOUR", "21"))
-RANKING_CUTOFF_MINUTE = int(os.getenv("RANKING_CUTOFF_MINUTE", "0"))
-
-# Retention
-INVITE_RETENTION_DAYS = int(os.getenv("INVITE_RETENTION_DAYS", "90"))
-
-# Telegram message safe split
 MAX_MESSAGE_LEN = 3800
 
 
@@ -73,12 +67,20 @@ def tz_now() -> datetime:
     return datetime.now(ZONE)
 
 
+def is_admin(user_id: int | None) -> bool:
+    return user_id is not None and user_id in ADMIN_USER_IDS
+
+
 def format_money(n: int) -> str:
     return f"{n:,}".replace(",", " ")
 
 
-def is_admin(user_id: int | None) -> bool:
-    return user_id is not None and user_id in ADMIN_USER_IDS
+def html_escape(s: str) -> str:
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def mention_html(user_id: int, label: str) -> str:
+    return f'<a href="tg://user?id={user_id}">{html_escape(label)}</a>'
 
 
 def load_state() -> dict:
@@ -103,7 +105,10 @@ STATE = load_state()
 
 
 def save_state() -> None:
-    STATE_FILE.write_text(json.dumps(STATE, ensure_ascii=False, indent=2), encoding="utf-8")
+    STATE_FILE.write_text(
+        json.dumps(STATE, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def remember_user(user) -> None:
@@ -122,13 +127,17 @@ def display_name_for(uid: int, fallback: str | None = None) -> str:
     username = meta.get("username")
     first_name = meta.get("first_name")
     last_name = meta.get("last_name")
+
     if username:
         return f"@{username}"
-    full_name = " ".join(x for x in [first_name, last_name] if x)
-    if full_name.strip():
-        return full_name.strip()
+
+    full = " ".join(x for x in [first_name, last_name] if x).strip()
+    if full:
+        return full
+
     if fallback:
         return fallback
+
     return str(uid)
 
 
@@ -141,18 +150,11 @@ def label_with_you(label: str, target_uid: int | str, viewer_uid: int | None) ->
     return label
 
 
-def html_escape(s: str) -> str:
-    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-
-def mention_html(user_id: int, label: str) -> str:
-    return f'<a href="tg://user?id={user_id}">{html_escape(label)}</a>'
-
-
 def cleanup_expired_discounts() -> None:
     now = tz_now()
     discounts = STATE.get("discounts", {})
     to_delete = []
+
     for uid, item in discounts.items():
         if item.get("used"):
             to_delete.append(uid)
@@ -163,8 +165,10 @@ def cleanup_expired_discounts() -> None:
                 to_delete.append(uid)
         except Exception:
             to_delete.append(uid)
+
     for uid in to_delete:
         discounts.pop(uid, None)
+
     if to_delete:
         save_state()
 
@@ -205,16 +209,9 @@ def register_invite_join(
     if inviter_id == joined_id:
         return
 
-    remember_stub = STATE.setdefault("participants_meta", {})
-    if str(inviter_id) not in remember_stub:
-        remember_stub[str(inviter_id)] = {"username": None, "first_name": inviter_label, "last_name": None}
-    if str(joined_id) not in remember_stub:
-        remember_stub[str(joined_id)] = {"username": None, "first_name": joined_label, "last_name": None}
-
-    # Same inviter + same joined user -> 1 marta hisoblanadi
-    key = (str(inviter_id), str(joined_id))
-    for item in reversed(STATE.get("invite_joins", [])):
-        if (str(item.get("inviter_id")), str(item.get("joined_id"))) == key:
+    # global duplicate: bir user bir marta hisoblanadi
+    for item in STATE.get("invite_joins", []):
+        if str(item.get("joined_id")) == str(joined_id):
             return
 
     STATE.setdefault("invite_joins", []).append(
@@ -224,7 +221,7 @@ def register_invite_join(
             "joined_id": joined_id,
             "inviter_label": inviter_label,
             "joined_label": joined_label,
-            "source": source,  # direct_add / personal_link
+            "source": source,
         }
     )
     save_state()
@@ -250,10 +247,6 @@ def active_window_bounds(now: datetime | None = None) -> tuple[datetime, datetim
 
 
 def closed_window_bounds(days_ago: int = 0, now: datetime | None = None) -> tuple[datetime, datetime]:
-    """
-    days_ago=0 => eng oxirgi yopilgan window
-    days_ago=1 => undan oldingi yopilgan window
-    """
     now = now or tz_now()
     active_start, _ = active_window_bounds(now)
     end = active_start - timedelta(days=days_ago)
@@ -261,41 +254,23 @@ def closed_window_bounds(days_ago: int = 0, now: datetime | None = None) -> tupl
     return start, end
 
 
-def parse_ts(raw: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(raw)
-    except Exception:
-        return None
-
-
 def score_events_between(start: datetime, end: datetime) -> list[tuple[str, int, str]]:
     cleanup_old_invites()
 
-    seen_joined_ids = set()
     scored: dict[str, int] = {}
     labels: dict[str, str] = {}
 
-    # Bitta user bir window ichida qayta chiqib-kirib qolsa, 1 marta sanaladi
-    # Prioritet:
-    # - joined_id bo'yicha unique
-    # - birinchi topilgan inviterga yoziladi
-    items = sorted(
-        STATE.get("invite_joins", []),
-        key=lambda x: x.get("ts", ""),
-    )
-
-    for item in items:
-        ts = parse_ts(item.get("ts", ""))
-        if not ts or ts < start or ts >= end:
+    for item in STATE.get("invite_joins", []):
+        try:
+            ts = datetime.fromisoformat(item["ts"])
+        except Exception:
             continue
 
-        joined_id = str(item.get("joined_id"))
-        inviter_id = str(item.get("inviter_id"))
+        if ts < start or ts >= end:
+            continue
+
+        inviter_id = str(item["inviter_id"])
         inviter_label = str(item.get("inviter_label") or inviter_id)
-
-        if joined_id in seen_joined_ids:
-            continue
-        seen_joined_ids.add(joined_id)
 
         scored[inviter_id] = scored.get(inviter_id, 0) + 1
 
@@ -307,49 +282,46 @@ def score_events_between(start: datetime, end: datetime) -> list[tuple[str, int,
             except Exception:
                 labels[inviter_id] = inviter_label
 
-    ranking = sorted(
+    return sorted(
         [(uid, count, labels.get(uid, uid)) for uid, count in scored.items()],
         key=lambda x: (-x[1], x[0]),
     )
-    return ranking
 
 
 def ranking_title(start: datetime, end: datetime) -> str:
     return (
         f"📊 <b>REYTING</b>\n"
-        f"<b>{start.strftime('%d.%m %H:%M')}</b> → <b>{end.strftime('%d.%m %H:%M')}</b>\n"
+        f"<b>{start.strftime('%d.%m %H:%M')}</b> → <b>{end.strftime('%d.%m %H:%M')}</b>"
     )
 
 
-def ranking_lines(
-    ranking: list[tuple[str, int, str]],
-    viewer_uid: int | None = None,
-    start_index: int = 1,
-) -> list[str]:
+def ranking_lines(ranking: list[tuple[str, int, str]], viewer_uid: int | None = None) -> list[str]:
     if not ranking:
         return ["Hozircha natija yo'q."]
 
     lines = []
     badges = ["🥇", "🥈", "🥉"]
-    for idx, (uid, count, raw_label) in enumerate(ranking, start=start_index):
-        prefix = badges[idx - 1] if idx <= 3 else f"{idx}."
-        shown_label = label_with_you(str(raw_label), uid, viewer_uid)
+
+    for i, (uid, count, raw_label) in enumerate(ranking, start=1):
+        prefix = badges[i - 1] if i <= 3 else f"{i}."
+        shown = label_with_you(raw_label, uid, viewer_uid)
 
         if str(raw_label).startswith("@"):
-            label_html = html_escape(shown_label)
+            label_html = html_escape(shown)
         else:
             try:
-                label_html = mention_html(int(uid), shown_label)
+                label_html = mention_html(int(uid), shown)
             except Exception:
-                label_html = html_escape(shown_label)
+                label_html = html_escape(shown)
 
         lines.append(f"{prefix} {label_html} — <b>{count} ta</b> odam")
+
     return lines
 
 
-def chunk_lines_with_header(header: str, lines: list[str], footer: str | None = None) -> list[str]:
+def chunk_lines(header: str, lines: list[str], footer: str | None = None) -> list[str]:
     parts = []
-    current = header.strip() + "\n\n"
+    current = header + "\n\n"
 
     for line in lines:
         candidate = current + line + "\n"
@@ -357,28 +329,43 @@ def chunk_lines_with_header(header: str, lines: list[str], footer: str | None = 
             if footer:
                 current += "\n" + footer
             parts.append(current.strip())
-            current = header.strip() + "\n\n" + line + "\n"
+            current = header + "\n\n" + line + "\n"
         else:
             current = candidate
 
     if footer:
         current += "\n" + footer
+
     parts.append(current.strip())
     return parts
 
 
-async def send_long_html(
-    target,
-    header: str,
-    lines: list[str],
-    footer: str | None = None,
-) -> None:
-    messages = chunk_lines_with_header(header, lines, footer)
-    for msg in messages:
-        if hasattr(target, "reply_text"):
-            await target.reply_text(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        else:
-            await target.send_message(msg, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+async def send_long_reply(update: Update, header: str, lines: list[str], footer: str | None = None) -> None:
+    parts = chunk_lines(header, lines, footer)
+    for msg in parts:
+        if update.callback_query:
+            await update.callback_query.message.reply_text(
+                msg,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+        elif update.message:
+            await update.message.reply_text(
+                msg,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+
+
+async def send_long_to_chat(bot, chat_id: str, header: str, lines: list[str], footer: str | None = None) -> None:
+    parts = chunk_lines(header, lines, footer)
+    for msg in parts:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=msg,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
 
 
 def contest_post_text() -> str:
@@ -454,16 +441,19 @@ def menu_for(user_id: int | None) -> InlineKeyboardMarkup:
 
 HELP_TEXT = (
     "🤖 <b>OrzuMall Xabarchi</b>\n\n"
-    "Kerakli bo'limni pastdagi tugmalardan tanlang.\n\n"
-    "<b>Asosiy funksiyalar:</b>\n"
     "• 06:00 da contest post\n"
     "• 20:00 da random g'olib\n"
-    "• 25% skidka nazorati\n"
-    "• Referral + kontaktdan qo'shish hisoblash\n"
-    f"• Reyting oynasi: <b>{RANKING_CUTOFF_HOUR:02d}:{RANKING_CUTOFF_MINUTE:02d}</b> → ertasi kuni shu vaqtgacha\n"
-    "• Cheksiz reyting (1000+ user bo'lsa ham)\n"
-    "• Oxirgi 3 kun natijalari"
+    "• 21:00 → 21:00 reyting\n"
+    "• Referral + kontaktdan qo'shish hisobi\n"
+    "• 3 kunlik natijalar"
 )
+
+
+async def reply_text(update: Update, text: str, **kwargs) -> None:
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, **kwargs)
+    elif update.message:
+        await update.message.reply_text(text, **kwargs)
 
 
 async def send_menu(update: Update, text: str) -> None:
@@ -494,13 +484,6 @@ async def send_menu(update: Update, text: str) -> None:
         )
 
 
-async def reply_text(update: Update, text: str, **kwargs) -> None:
-    if update.callback_query:
-        await update.callback_query.message.reply_text(text, **kwargs)
-    elif update.message:
-        await update.message.reply_text(text, **kwargs)
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user:
         remember_user(update.effective_user)
@@ -517,18 +500,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_expired_discounts()
     cleanup_old_invites()
     active_start, active_end = active_window_bounds()
+
     text = (
         "<b>⚙️ Joriy sozlamalar</b>\n\n"
-        f"• CONTEST_CHAT_ID: <code>{CONTEST_CHAT_ID or 'kiritilmagan'}</code>\n"
+        f"• CONTEST_CHAT_ID: <code>{html_escape(CONTEST_CHAT_ID or 'kiritilmagan')}</code>\n"
+        f"• INVITE_CHAT_ID: <code>{html_escape(INVITE_CHAT_ID or 'kiritilmagan')}</code>\n"
         f"• Contest posti: <b>{MORNING_HOUR:02d}:{MORNING_MINUTE:02d}</b>\n"
-        f"• Winner vaqti: <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b>\n"
-        f"• INVITE_CHAT_ID: <code>{INVITE_CHAT_ID or 'kiritilmagan'}</code>\n"
-        f"• Daily reyting post: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
-        f"• Reyting oynasi: <b>{RANKING_CUTOFF_HOUR:02d}:{RANKING_CUTOFF_MINUTE:02d}</b> → ertasi kuni\n"
-        f"• Joriy window: <b>{active_start.strftime('%d.%m %H:%M')}</b> → <b>{active_end.strftime('%d.%m %H:%M')}</b>\n"
-        f"• Faol skidkalar: <b>{len(STATE.get('discounts', {}))}</b>\n"
-        f"• Invite eventlar: <b>{len(STATE.get('invite_joins', []))}</b>\n"
-        f"• Retention: <b>{INVITE_RETENTION_DAYS} kun</b>\n"
+        f"• Winner: <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b>\n"
+        f"• Reyting post: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
+        f"• Reyting oynasi: <b>{active_start.strftime('%d.%m %H:%M')}</b> → <b>{active_end.strftime('%d.%m %H:%M')}</b>\n"
+        f"• Invite events: <b>{len(STATE.get('invite_joins', []))}</b>\n"
+        f"• Faol skidkalar: <b>{len(STATE.get('discounts', []))}</b>\n"
         f"• TZ: <b>{TZ}</b>"
     )
     await reply_text(update, text, parse_mode=ParseMode.HTML)
@@ -538,9 +520,11 @@ async def contest_post(context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not CONTEST_CHAT_ID:
         logger.warning("CONTEST_CHAT_ID yo'q.")
         return False
+
     cleanup_expired_discounts()
     STATE["participants"] = []
     STATE["current_post_date"] = tz_now().date().isoformat()
+
     try:
         msg = await context.bot.send_message(
             chat_id=CONTEST_CHAT_ID,
@@ -563,9 +547,11 @@ async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         if reaction.message_id != STATE.get("current_post_id"):
             return
+
         actor = reaction.user
         if not actor or actor.is_bot:
             return
+
         remember_user(actor)
         participants = set(STATE.get("participants", []))
         participants.add(actor.id)
@@ -640,8 +626,7 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if old and old.get("invite_link"):
         await reply_text(
             update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(old['invite_link'])}</code>\n\n"
-            "Shu havola orqali kirganlar sizga yoziladi.",
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(old['invite_link'])}</code>",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -658,15 +643,15 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "name": getattr(link, "name", None),
         }
         save_state()
+
         await reply_text(
             update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(link.invite_link)}</code>\n\n"
-            "Shu havola orqali kirganlar sizga yoziladi.",
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(link.invite_link)}</code>",
             parse_mode=ParseMode.HTML,
         )
     except Exception:
-        logger.exception("Referral link yaratilmagan")
-        await reply_text(update, "Referral havolani yaratib bo'lmadi. Botda invite huquqi bo'lishi kerak.")
+        logger.exception("Referral link yaratilmadi")
+        await reply_text(update, "Referral havolani yaratib bo'lmadi.")
 
 
 async def new_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -683,7 +668,6 @@ async def new_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             continue
         remember_user(member)
 
-        # Kontaktdan / qo'lda qo'shish holati
         if inviter and not inviter.is_bot and inviter.id != member.id:
             register_invite_join(
                 inviter_id=inviter.id,
@@ -699,18 +683,20 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not cmu or str(cmu.chat.id) != str(INVITE_CHAT_ID):
         return
 
+    joined_user = getattr(cmu.new_chat_member, "user", None)
+    if not joined_user or joined_user.is_bot:
+        return
+
     old_status = getattr(cmu.old_chat_member, "status", None)
     new_status = getattr(cmu.new_chat_member, "status", None)
-    joined_now = old_status in ("left", "kicked") and new_status in ("member", "administrator", "restricted")
+
+    # old_status None bo'lsa ham join deb olamiz
+    joined_now = new_status in ("member", "administrator", "restricted") and old_status != new_status
     if not joined_now:
         return
 
-    joined_user = cmu.new_chat_member.user
-    if not joined_user or joined_user.is_bot:
-        return
     remember_user(joined_user)
 
-    # Personal referral link orqali qo'shilganlarni ushlaydi
     inv_link = getattr(cmu, "invite_link", None)
     if inv_link and getattr(inv_link, "name", None):
         name = inv_link.name or ""
@@ -728,76 +714,64 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
                 logger.exception("Invite link parse bo'lmadi")
 
 
-async def send_ranking_for_window(
-    target,
-    start: datetime,
-    end: datetime,
-    viewer_uid: int | None = None,
-    footer: str | None = None,
-) -> None:
+async def top_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    start, end = active_window_bounds()
     ranking = score_events_between(start, end)
     header = ranking_title(start, end)
-    lines = ranking_lines(ranking, viewer_uid=viewer_uid)
-    await send_long_html(target, header, lines, footer=footer)
-
-
-async def top_active(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    viewer_uid = update.effective_user.id if update.effective_user else None
-    start, end = active_window_bounds()
-    footer = "🔗 Referral havolangiz: /myref"
-    target = update.callback_query.message if update.callback_query else update.message
-    await send_ranking_for_window(target, start, end, viewer_uid=viewer_uid, footer=footer)
+    lines = ranking_lines(ranking, update.effective_user.id if update.effective_user else None)
+    await send_long_reply(update, header, lines, "🔗 Referral havola: /myref")
 
 
 async def top_prev(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    viewer_uid = update.effective_user.id if update.effective_user else None
     start, end = closed_window_bounds(0)
-    target = update.callback_query.message if update.callback_query else update.message
-    await send_ranking_for_window(target, start, end, viewer_uid=viewer_uid)
+    ranking = score_events_between(start, end)
+    header = ranking_title(start, end)
+    lines = ranking_lines(ranking, update.effective_user.id if update.effective_user else None)
+    await send_long_reply(update, header, lines)
 
 
 async def top3days(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     viewer_uid = update.effective_user.id if update.effective_user else None
-    target = update.callback_query.message if update.callback_query else update.message
 
     for days_ago in range(0, 3):
         start, end = closed_window_bounds(days_ago)
-        await send_ranking_for_window(target, start, end, viewer_uid=viewer_uid)
+        ranking = score_events_between(start, end)
+        header = ranking_title(start, end)
+        lines = ranking_lines(ranking, viewer_uid)
+        await send_long_reply(update, header, lines)
 
 
 async def post_top_daily(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not INVITE_CHAT_ID:
-        logger.warning("INVITE_CHAT_ID yo'q.")
         return
-    try:
-        start, end = closed_window_bounds(0)
-        await send_ranking_for_window(
-            context.bot,
-            start,
-            end,
-            footer="🔗 Referral havolangiz uchun: /myref",
-        )
-    except Exception:
-        logger.exception("Daily reyting post yuborilmadi")
+
+    start, end = closed_window_bounds(0)
+    ranking = score_events_between(start, end)
+    header = ranking_title(start, end)
+    lines = ranking_lines(ranking)
+    await send_long_to_chat(
+        context.bot,
+        INVITE_CHAT_ID,
+        header,
+        lines,
+        "🔗 Referral havolangiz uchun: /myref",
+    )
 
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     active_start, active_end = active_window_bounds()
     prev_start, prev_end = closed_window_bounds(0)
-    current_ranking = score_events_between(active_start, active_end)
-    prev_ranking = score_events_between(prev_start, prev_end)
 
     text = (
         "📌 <b>Bugungi holat</b>\n\n"
         f"• Contest sana: <b>{STATE.get('current_post_date') or 'yo‘q'}</b>\n"
         f"• Contest post ID: <code>{STATE.get('current_post_id') or 'yo‘q'}</code>\n"
-        f"• Contest ishtirokchilari: <b>{len(STATE.get('participants', []))}</b>\n\n"
+        f"• Contest ishtirokchilari: <b>{len(STATE.get('participants', []))}</b>\n"
+        f"• Invite join eventlar: <b>{len(STATE.get('invite_joins', []))}</b>\n\n"
         f"• Joriy reyting oynasi:\n"
-        f"  <b>{active_start.strftime('%d.%m %H:%M')}</b> → <b>{active_end.strftime('%d.%m %H:%M')}</b>\n"
-        f"• Joriy reytingdagi odamlar soni: <b>{len(current_ranking)}</b>\n\n"
-        f"• Oxirgi yopilgan reyting oynasi:\n"
-        f"  <b>{prev_start.strftime('%d.%m %H:%M')}</b> → <b>{prev_end.strftime('%d.%m %H:%M')}</b>\n"
-        f"• O'sha oynadagi odamlar soni: <b>{len(prev_ranking)}</b>"
+        f"<b>{active_start.strftime('%d.%m %H:%M')}</b> → <b>{active_end.strftime('%d.%m %H:%M')}</b>\n\n"
+        f"• Oxirgi yopilgan oyna:\n"
+        f"<b>{prev_start.strftime('%d.%m %H:%M')}</b> → <b>{prev_end.strftime('%d.%m %H:%M')}</b>"
     )
     await reply_text(update, text, parse_mode=ParseMode.HTML)
 
@@ -811,31 +785,33 @@ async def discounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     now = tz_now()
     lines = ["📊 <b>Faol skidkalar</b>\n"]
+
     for uid, item in items.items():
         try:
             exp = datetime.fromisoformat(item["expires_at"])
         except Exception:
             continue
+
         remain = exp - now
         total_sec = int(remain.total_seconds())
         if total_sec <= 0:
             continue
+
         hours = total_sec // 3600
         minutes = (total_sec % 3600) // 60
         label = item.get("label") or display_name_for(int(uid))
+
         lines.append(
             f"• {mention_html(int(uid), label)}\n"
             f"  └ {item['discount_percent']}% | max {format_money(item['max_amount'])} so'm | {hours} soat {minutes} daqiqa qoldi"
         )
+
     await reply_text(update, "\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 async def postnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ok = await contest_post(context)
-    if ok:
-        await reply_text(update, "✅ Contest posti yuborildi.")
-    else:
-        await reply_text(update, "❌ Contest posti yuborilmadi. CONTEST_CHAT_ID yoki admin huquqini tekshiring.")
+    await reply_text(update, "✅ Contest posti yuborildi." if ok else "❌ Contest posti yuborilmadi.")
 
 
 async def drawnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -847,6 +823,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     if not query:
         return
+
     data = query.data
     user_id = update.effective_user.id if update.effective_user else None
 
@@ -856,6 +833,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await query.answer()
+
     if data == "help":
         await help_menu(update, context)
     elif data == "status":
