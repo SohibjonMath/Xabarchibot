@@ -49,12 +49,16 @@ ADMIN_USER_IDS = [
     int(x.strip()) for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()
 ]
 
-DISCOUNT_PERCENT = int(os.getenv("DISCOUNT_PERCENT", "25"))
-DISCOUNT_MAX_SUM = int(os.getenv("DISCOUNT_MAX_SUM", "1000000"))
+DISCOUNT_PERCENT = int(os.getenv("DISCOUNT_PERCENT", "15"))
+DISCOUNT_MAX_SUM = int(os.getenv("DISCOUNT_MAX_SUM", "0"))
 DISCOUNT_HOURS = int(os.getenv("DISCOUNT_HOURS", "72"))
 WINNER_COOLDOWN_DAYS = int(os.getenv("WINNER_COOLDOWN_DAYS", "30"))
 
 INVITE_RETENTION_DAYS = int(os.getenv("INVITE_RETENTION_DAYS", "90"))
+
+# Eslatma soatlari (kun davomida 3 marta eslatma)
+REMINDER_HOURS = [int(x.strip()) for x in os.getenv("REMINDER_HOURS", "10,14,17").split(",") if x.strip()]
+REMINDER_MINUTE = int(os.getenv("REMINDER_MINUTE", "0"))
 
 STATE_DIR = Path(os.getenv("STATE_DIR", "./data"))
 STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,6 +76,8 @@ def is_admin(user_id: int | None) -> bool:
 
 
 def format_money(n: int) -> str:
+    if n == 0:
+        return "cheklanmagan"
     return f"{n:,}".replace(",", " ")
 
 
@@ -209,7 +215,6 @@ def register_invite_join(
     if inviter_id == joined_id:
         return
 
-    # global duplicate: bir user bir marta hisoblanadi
     for item in STATE.get("invite_joins", []):
         if str(item.get("joined_id")) == str(joined_id):
             return
@@ -369,32 +374,49 @@ async def send_long_to_chat(bot, chat_id: str, header: str, lines: list[str], fo
 
 
 def contest_post_text() -> str:
+    max_sum_text = format_money(DISCOUNT_MAX_SUM)
     return (
         "🎁 <b>BUGUNGI MUSOBAQA BOSHLANDI!</b>\n\n"
         f"Bugun 1 ta omadli ishtirokchi <b>{DISCOUNT_PERCENT}% skidka</b> yutadi.\n\n"
-        "<b>Qatnashish:</b>\n"
-        "1️⃣ Shu postga reaksiya qoldiring\n"
-        "2️⃣ Guruhda qoling\n\n"
+        "<b>📋 Qatnashish:</b>\n"
+        "1️⃣ Shu postga reaksiya qoldiring (👍❤️🔥)\n"
+        "2️⃣ Guruhda qoling\n"
+        "3️⃣ Do'stlaringizni taklif qiling! (/myref)\n\n"
         f"⏰ Natija bugun <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b> da e'lon qilinadi.\n\n"
-        "<b>Skidka shartlari:</b>\n"
-        "• Faqat 1 martalik\n"
-        f"• Maksimal {format_money(DISCOUNT_MAX_SUM)} so'mgacha xaridlar uchun\n"
+        "<b>🏆 Skidka shartlari:</b>\n"
+        f"• {DISCOUNT_PERCENT}% chegirma\n"
+        f"• Summa chegarasi: {max_sum_text}\n"
         f"• {DISCOUNT_HOURS} soat amal qiladi\n\n"
-        "💬 Omad hammaga!"
+        "💬 <b>Omad hammaga!</b>\n\n"
+        "🔔 <i>Eslatma: Reaksiya qoldirishni unutmang!</i>"
     )
 
 
 def winner_post_text(winner_id: int) -> str:
     label = display_name_for(winner_id)
+    max_sum_text = format_money(DISCOUNT_MAX_SUM)
     return (
-        "🏆 <b>BUGUNGI G‘OLIB ANIQLANDI!</b>\n\n"
+        "🏆 <b>BUGUNGI G'OLIB ANIQLANDI!</b>\n\n"
         f"🎉 Tabriklaymiz: {mention_html(winner_id, label)}\n\n"
         f"Sizga <b>{DISCOUNT_PERCENT}% skidka</b> berildi.\n\n"
-        "<b>Shartlar:</b>\n"
-        "• Faqat 1 martalik\n"
-        f"• Maksimal {format_money(DISCOUNT_MAX_SUM)} so'mgacha xarid uchun\n"
+        "<b>📋 Shartlar:</b>\n"
+        f"• {DISCOUNT_PERCENT}% chegirma\n"
+        f"• Summa chegarasi: {max_sum_text}\n"
         f"• {DISCOUNT_HOURS} soat amal qiladi\n\n"
         "📩 Buyurtma uchun admin bilan bog'laning."
+    )
+
+
+def reminder_text() -> str:
+    max_sum_text = format_money(DISCOUNT_MAX_SUM)
+    return (
+        "⏰ <b>ESLATMA!</b>\n\n"
+        f"Bugungi <b>{DISCOUNT_PERCENT}% skidka</b> contesti davom etmoqda!\n\n"
+        "✅ Hali reaksiya qoldirmagan bo'lsangiz, yuqoridagi postga 👍 yoki ❤️ bosing!\n"
+        "🔗 Do'stlaringizni taklif qilish uchun: /myref\n\n"
+        f"🏆 Sovrin: {DISCOUNT_PERCENT}% chegirma (summa {max_sum_text})\n"
+        f"⏳ Final <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b> da!\n\n"
+        "<i>Omadingizni boy bermang!</i>"
     )
 
 
@@ -441,11 +463,20 @@ def menu_for(user_id: int | None) -> InlineKeyboardMarkup:
 
 HELP_TEXT = (
     "🤖 <b>OrzuMall Xabarchi</b>\n\n"
-    "• 06:00 da contest post\n"
-    "• 20:00 da random g'olib\n"
-    "• 21:00 → 21:00 reyting\n"
-    "• Referral + kontaktdan qo'shish hisobi\n"
-    "• 3 kunlik natijalar"
+    "📌 <b>Bot haqida:</b>\n"
+    "• Har kuni 06:00 da contest posti chiqariladi\n"
+    "• Postga reaksiya qoldirib ishtirok eting\n"
+    "• 20:00 da random g'olib aniqlanadi\n"
+    "• G'olib 15% skidka yutadi (summa cheklanmagan)\n\n"
+    "📊 <b>Reyting tizimi:</b>\n"
+    "• /myref - shaxsiy taklif havolangiz\n"
+    "• Har bir taklif qilgan do'stingiz uchun ball olasiz\n"
+    "• Reyting 21:00 dan 21:00 gacha hisoblanadi\n\n"
+    "🔧 <b>Buyruqlar:</b>\n"
+    "• /top - joriy reyting\n"
+    "• /top3days - 3 kunlik reyting\n"
+    "• /myref - referral havola\n"
+    "• /help - yordam"
 )
 
 
@@ -501,6 +532,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_old_invites()
     active_start, active_end = active_window_bounds()
 
+    max_sum_text = "cheklanmagan" if DISCOUNT_MAX_SUM == 0 else format_money(DISCOUNT_MAX_SUM)
+
     text = (
         "<b>⚙️ Joriy sozlamalar</b>\n\n"
         f"• CONTEST_CHAT_ID: <code>{html_escape(CONTEST_CHAT_ID or 'kiritilmagan')}</code>\n"
@@ -508,9 +541,11 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"• Contest posti: <b>{MORNING_HOUR:02d}:{MORNING_MINUTE:02d}</b>\n"
         f"• Winner: <b>{WINNER_HOUR:02d}:{WINNER_MINUTE:02d}</b>\n"
         f"• Reyting post: <b>{TOP_HOUR:02d}:{TOP_MINUTE:02d}</b>\n"
+        f"• Skidka: <b>{DISCOUNT_PERCENT}%</b> (max {max_sum_text})\n"
         f"• Reyting oynasi: <b>{active_start.strftime('%d.%m %H:%M')}</b> → <b>{active_end.strftime('%d.%m %H:%M')}</b>\n"
         f"• Invite events: <b>{len(STATE.get('invite_joins', []))}</b>\n"
         f"• Faol skidkalar: <b>{len(STATE.get('discounts', []))}</b>\n"
+        f"• Eslatma soatlari: <b>{', '.join(str(h) for h in REMINDER_HOURS)}:{REMINDER_MINUTE:02d}</b>\n"
         f"• TZ: <b>{TZ}</b>"
     )
     await reply_text(update, text, parse_mode=ParseMode.HTML)
@@ -538,6 +573,26 @@ async def contest_post(context: ContextTypes.DEFAULT_TYPE) -> bool:
     except Exception:
         logger.exception("Contest posti yuborilmadi")
         return False
+
+
+async def send_reminder(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kun davomida eslatma yuboradi"""
+    if not CONTEST_CHAT_ID:
+        return
+    
+    if STATE.get("current_post_id") is None:
+        return
+    
+    try:
+        await context.bot.send_message(
+            chat_id=CONTEST_CHAT_ID,
+            text=reminder_text(),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        logger.info(f"Eslatma yuborildi: {tz_now().strftime('%H:%M')}")
+    except Exception as e:
+        logger.error(f"Eslatma yuborilmadi: {e}")
 
 
 async def reaction_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -573,7 +628,7 @@ async def draw_winner(context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
         try:
             await context.bot.send_message(
                 chat_id=CONTEST_CHAT_ID,
-                text="Bugun hali hech kim reaksiya qoldirmadi.",
+                text="❌ Bugun hali hech kim reaksiya qoldirmadi.",
             )
         except Exception:
             logger.exception("Contest chatga xabar yuborilmadi")
@@ -626,7 +681,8 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if old and old.get("invite_link"):
         await reply_text(
             update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(old['invite_link'])}</code>",
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(old['invite_link'])}</code>\n\n"
+            f"<i>Havolangiz orqali qo'shilgan har bir do'stingiz sizga reytingda +1 ball olib keladi!</i>",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -646,12 +702,13 @@ async def myref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await reply_text(
             update,
-            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(link.invite_link)}</code>",
+            f"🔗 <b>Sizning taklif havolangiz:</b>\n\n<code>{html_escape(link.invite_link)}</code>\n\n"
+            f"<i>⚠️ Bu havola faqat sizga tegishli. Do'stlaringizni taklif qiling va reytingda yuqori o'ringa chiqing!</i>",
             parse_mode=ParseMode.HTML,
         )
     except Exception:
         logger.exception("Referral link yaratilmadi")
-        await reply_text(update, "Referral havolani yaratib bo'lmadi.")
+        await reply_text(update, "❌ Referral havolani yaratib bo'lmadi.")
 
 
 async def new_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -690,7 +747,6 @@ async def chat_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     old_status = getattr(cmu.old_chat_member, "status", None)
     new_status = getattr(cmu.new_chat_member, "status", None)
 
-    # old_status None bo'lsa ham join deb olamiz
     joined_now = new_status in ("member", "administrator", "restricted") and old_status != new_status
     if not joined_now:
         return
@@ -780,11 +836,11 @@ async def discounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cleanup_expired_discounts()
     items = STATE.get("discounts", {})
     if not items:
-        await reply_text(update, "Faol skidkalar yo'q.")
+        await reply_text(update, "📭 Faol skidkalar yo'q.")
         return
 
     now = tz_now()
-    lines = ["📊 <b>Faol skidkalar</b>\n"]
+    lines = ["💰 <b>Faol skidkalar</b>\n"]
 
     for uid, item in items.items():
         try:
@@ -800,21 +856,28 @@ async def discounts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         hours = total_sec // 3600
         minutes = (total_sec % 3600) // 60
         label = item.get("label") or display_name_for(int(uid))
+        max_sum_text = "cheklanmagan" if item.get("max_amount", 0) == 0 else format_money(item.get("max_amount", 0))
 
         lines.append(
             f"• {mention_html(int(uid), label)}\n"
-            f"  └ {item['discount_percent']}% | max {format_money(item['max_amount'])} so'm | {hours} soat {minutes} daqiqa qoldi"
+            f"  └ {item['discount_percent']}% chegirma | max {max_sum_text} | {hours} soat {minutes} daqiqa qoldi"
         )
 
     await reply_text(update, "\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
 
 
 async def postnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        await reply_text(update, "❌ Bu buyruq faqat admin uchun.")
+        return
     ok = await contest_post(context)
     await reply_text(update, "✅ Contest posti yuborildi." if ok else "❌ Contest posti yuborilmadi.")
 
 
 async def drawnow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_admin(update.effective_user.id):
+        await reply_text(update, "❌ Bu buyruq faqat admin uchun.")
+        return
     ok, message = await draw_winner(context)
     await reply_text(update, message)
 
@@ -829,7 +892,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     admin_buttons = {"postnow", "drawnow", "today", "discounts", "status"}
     if data in admin_buttons and not is_admin(user_id):
-        await query.answer("Bu bo'lim faqat admin uchun.", show_alert=True)
+        await query.answer("🚫 Bu bo'lim faqat admin uchun.", show_alert=True)
         return
 
     await query.answer()
@@ -894,6 +957,14 @@ def main() -> None:
             time=time(hour=TOP_HOUR, minute=TOP_MINUTE, tzinfo=ZONE),
             name="daily_top_ranking",
         )
+        
+        for hour in REMINDER_HOURS:
+            jq.run_daily(
+                send_reminder,
+                time=time(hour=hour, minute=REMINDER_MINUTE, tzinfo=ZONE),
+                name=f"reminder_{hour}",
+            )
+            logger.info(f"Eslatma job qo'shildi: {hour:02d}:{REMINDER_MINUTE:02d}")
 
     app.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
 
